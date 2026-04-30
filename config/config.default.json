@@ -1,0 +1,90 @@
+{
+  "topics_root": "",
+  "default_topic": "default",
+  "default_profile": "gpt-4o-mini",
+  "window_messages": 32,
+  "profiles": {
+    "sonnet": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "max_context_tokens": 200000,
+      "context_token_limit": 48000,
+      "max_user_messages": 32,
+      "max_output_tokens": 4096,
+      "color": "bright_magenta",
+      "info": {
+        "cost_tier": "medium",
+        "pricing_usd_per_1m_tokens": {
+          "input": 3,
+          "output": 15
+        }
+      }
+    },
+    "haiku": {
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5-20251001",
+      "max_context_tokens": 200000,
+      "context_token_limit": 32000,
+      "max_user_messages": 32,
+      "max_output_tokens": 4096,
+      "color": "bright_green",
+      "info": {
+        "cost_tier": "very_low",
+        "pricing_usd_per_1m_tokens": {
+          "input": 0.8,
+          "output": 4
+        }
+      }
+    },
+    "gpt-4.1": {
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "max_context_tokens": 1048576,
+      "context_token_limit": 48000,
+      "max_user_messages": 32,
+      "color": "yellow",
+      "info": {
+        "cost_tier": "high",
+        "pricing_usd_per_1m_tokens": {
+          "cached_input": 0.5,
+          "input": 2,
+          "output": 8
+        }
+      }
+    },
+    "gpt-4o-mini": {
+      "provider": "openai",
+      "model": "gpt-4o-mini",
+      "max_context_tokens": 128000,
+      "context_token_limit": 16000,
+      "max_user_messages": 32,
+      "color": "green",
+      "info": {
+        "cost_tier": "very_low",
+        "pricing_usd_per_1m_tokens": {
+          "cached_input": 0.075,
+          "input": 0.15,
+          "output": 0.6
+        }
+      }
+    },
+    "llama": {
+      "provider": "ollama",
+      "host": "http://localhost:11434",
+      "model": "llama3.1:8b",
+      "max_context_tokens": 8192,
+      "context_token_limit": 6000,
+      "max_user_messages": 16,
+      "color": "cyan"
+    },
+    "qwen": {
+      "provider": "ollama",
+      "host": "http://localhost:11434",
+      "model": "qwen2.5-coder:7b",
+      "max_context_tokens": 16384,
+      "context_token_limit": 12000,
+      "max_user_messages": 20,
+      "color": "magenta"
+    }
+  }
+}

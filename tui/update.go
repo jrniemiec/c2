@@ -1,0 +1,942 @@
+package tui
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/charmbracelet/bubbles/key"
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/jrniemiec/c2/audio"
+	"github.com/jrniemiec/c2/speech"
+	"github.com/jrniemiec/lore/config"
+	"github.com/jrniemiec/lore/core"
+	"github.com/jrniemiec/lore/engine"
+)
+
+// Update handles all incoming messages.
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	switch msg := msg.(type) {
+
+	// --- window resize ---
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.syncInputPrompt()
+		m.syncLayout()
+		m.rebuildConvContent()
+
+	// --- spinner tick ---
+	case spinnerTickMsg:
+		m.spinnerFrame++
+		// Cursor blinks at ~400ms (every 4 ticks of 100ms).
+		if m.spinnerFrame%4 == 0 {
+			m.cursorVisible = !m.cursorVisible
+		}
+		if m.streaming || m.isTTSPlaying() {
+			m.rebuildConvContent()
+		}
+		cmds = append(cmds, spinnerTick())
+
+	// --- streaming token ---
+	case streamDeltaMsg:
+		m.streamBuf += string(msg)
+		// Update the last exchange's in-progress reply.
+		if len(m.exchanges) > 0 {
+			last := &m.exchanges[len(m.exchanges)-1]
+			if !last.complete {
+				last.asstMsg.Content = m.streamBuf
+			}
+		}
+		m.rebuildConvContent()
+		// Sentence-streaming TTS: detect complete sentences and start playback early.
+		if m.ttsAuto && len(m.exchanges) > 0 {
+			m.streamSentenceBuf += string(msg)
+			sentences, remaining := extractSentences(m.streamSentenceBuf)
+			m.streamSentenceBuf = remaining
+			exIdx := len(m.exchanges) - 1
+			for _, s := range sentences {
+				enqueueSentenceTTS(s, ttsStrip(s), exIdx, &m, &cmds)
+			}
+		}
+
+	// --- streaming done ---
+	case streamDoneMsg:
+		m.streaming = false
+		m.cancelStream = nil
+		if msg.err != nil {
+			// Show error as a synthetic assistant message
+			if len(m.exchanges) > 0 {
+				last := &m.exchanges[len(m.exchanges)-1]
+				last.asstMsg.Content = fmt.Sprintf("[error: %v]", msg.err)
+				last.complete = true
+			}
+		} else {
+			if len(m.exchanges) > 0 {
+				last := &m.exchanges[len(m.exchanges)-1]
+				last.complete = true
+				last.elapsed = msg.result.Elapsed
+				last.costUSD = calcExchangeCost(msg.result, m.eng)
+				last.model = m.eng.ProfileCode()
+			}
+			result := msg.result
+			m.lastResult = &result
+			m.topicStats.Calls++
+			m.topicStats.InputTokens += msg.result.Usage.InputTokens
+			m.topicStats.OutputTokens += msg.result.Usage.OutputTokens
+			m.topicStats.CostUSD += calcExchangeCost(msg.result, m.eng)
+			m.sessionStats.Calls++
+			m.sessionStats.InputTokens += msg.result.Usage.InputTokens
+			m.sessionStats.OutputTokens += msg.result.Usage.OutputTokens
+			m.sessionStats.CostUSD += m.topicStats.CostUSD
+			// Flush any remaining partial sentence from the stream buffer.
+			if m.ttsAuto && len(m.exchanges) > 0 {
+				remainder := ttsStrip(strings.TrimSpace(m.streamSentenceBuf))
+				m.streamSentenceBuf = ""
+				exIdx := len(m.exchanges) - 1
+				enqueueSentenceTTS(remainder, remainder, exIdx, &m, &cmds)
+			}
+		}
+		m.streamBuf = ""
+		m.streamSentenceBuf = ""
+		m.rebuildConvContent()
+		m.input.Focus()
+
+	// --- TTS done ---
+	// --- voice pipeline ---
+	case voicePipelineErrMsg:
+		m.voiceErr = msg.err.Error()
+		m.voiceReady = false
+
+	case voiceSpeechStartedMsg:
+		// Only act if we're in voice mode.
+		if m.mode == modeVoice {
+			m.transcribing = true
+			m.pendingVoiceSubmit = false
+			m.input.SetValue("")
+			// Stop TTS playback so it doesn't talk over the user.
+			m.killTTS()
+		}
+
+	case voiceTranscriptMsg:
+		if m.mode == modeVoice {
+			m.transcribing = false
+			if msg.text != "" {
+				m.input.SetValue(msg.text)
+				m.input.CursorEnd()
+				m.syncLayout()
+				// Schedule auto-submit after 500ms.
+				m.pendingVoiceSubmit = true
+				cmds = append(cmds, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+					return voiceAutoSubmitMsg{}
+				}))
+			}
+		}
+
+	case voiceAutoSubmitMsg:
+		if m.pendingVoiceSubmit && m.mode == modeVoice && !m.streaming {
+			m.pendingVoiceSubmit = false
+			cmds = append(cmds, m.sendMessage())
+		}
+
+	case ttsDoneMsg:
+		if msg.gen != m.ttsGen {
+			break // stale message from a killed process — ignore
+		}
+		m.ttsCmd = nil
+		m.ttsKokoroStop = nil
+		m.ttsExIdx = -1
+		// Drain sentence-streaming queue first (higher priority than play-all).
+		if len(m.ttsPendingSentences) > 0 {
+			next := m.ttsPendingSentences[0]
+			m.ttsPendingSentences = m.ttsPendingSentences[1:]
+			cmds = append(cmds, startTTS(next.text, next.exIdx, &m))
+		} else if len(m.ttsQueue) > 0 {
+			// Drain play-all queue.
+			next := m.ttsQueue[0]
+			m.ttsQueue = m.ttsQueue[1:]
+			if next < len(m.exchanges) {
+				cmds = append(cmds, startTTS(ttsText(&m.exchanges[next]), next, &m))
+			}
+		}
+		m.rebuildConvContent()
+
+	// --- mouse ---
+	case tea.MouseMsg:
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			m.userScrolled = true
+			m.conv.ScrollUp(3)
+		case tea.MouseButtonWheelDown:
+			m.conv.ScrollDown(3)
+			if m.conv.AtBottom() {
+				m.userScrolled = false
+			}
+		case tea.MouseButtonLeft:
+			// Click on the mode indicator in the top bar (row 0) toggles mode.
+			if msg.Y == 0 && m.modeIndicatorCol > 0 && msg.X >= m.modeIndicatorCol {
+				if m.mode == modeText {
+					m.mode = modeVoice
+				} else {
+					m.mode = modeText
+				}
+			}
+		}
+
+	// --- keyboard ---
+	case tea.KeyMsg:
+		// Bracketed paste: entire pasted content arrives as one KeyMsg with Paste=true.
+		if msg.Paste && m.focus == paneInput && !m.streaming && m.pendingAction == nil {
+			// Normalize \r\n and bare \r to \n (terminals paste with \r endings).
+			content := strings.ReplaceAll(string(msg.Runes), "\r\n", "\n")
+			content = strings.ReplaceAll(content, "\r", "\n")
+			lines := strings.Split(content, "\n")
+			if len(lines) > 20 || len([]rune(content)) > 256 {
+				pre := m.input.Value()
+				blob := pre
+				if blob != "" && !strings.HasSuffix(blob, "\n") {
+					blob += "\n"
+				}
+				blob += content
+				m.pastedBlob = blob
+				lineCount := strings.Count(content, "\n") + 1
+				kb := float64(len(content)) / 1024.0
+				label := fmt.Sprintf("[pasted: %d lines · %.1f KB]", lineCount, kb)
+				// Keep pre-text visible; append label so user can see what was typed.
+				m.input.SetValue(pre + label)
+				m.input.CursorEnd()
+				m.completionItems = nil
+				m.completionIdx = -1
+				m.syncLayout()
+			} else {
+				m.input.InsertString(content)
+			}
+			break
+		}
+
+		// Tab with no active completion → toggle voice/text mode before textarea sees it.
+		if msg.Type == tea.KeyTab && len(m.completionItems) == 0 {
+			if m.mode == modeText {
+				m.mode = modeVoice
+			} else {
+				m.mode = modeText
+			}
+			return m, tea.Batch(cmds...)
+		}
+
+		// [ / ] — adjust TTS speed while playing; restart at new rate.
+		if msg.Type == tea.KeyRunes && m.isTTSPlaying() {
+			switch string(msg.Runes) {
+			case "[":
+				if m.ttsRate > 80 {
+					m.ttsRate -= 20
+				}
+				exIdx := m.ttsExIdx
+				m.killTTS()
+				cmds = append(cmds, startTTS(ttsText(&m.exchanges[exIdx]), exIdx, &m))
+				return m, tea.Batch(cmds...)
+			case "]":
+				if m.ttsRate < 500 {
+					m.ttsRate += 20
+				}
+				exIdx := m.ttsExIdx
+				m.killTTS()
+				cmds = append(cmds, startTTS(ttsText(&m.exchanges[exIdx]), exIdx, &m))
+				return m, tea.Batch(cmds...)
+			}
+		}
+
+		// Any key dismisses the cmd pane (unless a pending action requires confirmation).
+		if m.cmdPaneOpen && m.pendingAction == nil && m.focus == paneInput {
+			m.cmdPaneOpen = false
+			m.lastCmd = nil
+			m.syncLayout()
+		}
+
+		switch {
+
+		// Ctrl+C: stop TTS, cancel stream, or quit
+		case key.Matches(msg, keys.Cancel):
+			if m.isTTSPlaying() {
+				m.killTTS()
+				m.rebuildConvContent()
+				return m, nil
+			}
+			if m.streaming && m.cancelStream != nil {
+				m.cancelStream()
+				return m, nil
+			}
+			now := time.Now()
+			if now.Sub(m.lastCtrlC) < 500*time.Millisecond {
+				m.killTTS()
+				return m, tea.Quit
+			}
+			m.lastCtrlC = now
+			return m, nil
+
+		// Esc: exit completion, cancel pending action, collapse cmd pane, or return focus to input
+		case key.Matches(msg, keys.Dismiss):
+			if len(m.completionItems) > 0 {
+				m.completionItems = nil
+				m.completionIdx = -1
+				m.syncLayout()
+			} else if m.pendingAction != nil {
+				m.pendingAction = nil
+				m.pendingPost = nil
+				m.confirmBuf = ""
+				m.focusedExIdx = -1
+				canceled := cmdResult{input: m.lastCmd.input, output: []string{"operation canceled"}}
+				m.lastCmd = &canceled
+				m.cmdScroll.SetContent(renderCmdOutput(&m))
+				m.cmdScroll.GotoTop()
+				m.focus = paneInput
+				m.input.Focus()
+				m.rebuildConvContent()
+				m.syncLayout()
+			} else if m.cmdPaneOpen {
+				m.cmdPaneOpen = false
+				m.lastCmd = nil
+				m.focus = paneInput
+				m.input.Focus()
+				m.syncLayout()
+			} else if m.focus == paneInput && m.input.Value() != "" {
+				m.input.Reset()
+				m.input.SetHeight(1)
+				m.pastedBlob = ""
+				m.completionItems = nil
+				m.completionIdx = -1
+				m.historyIdx = -1
+				m.historySaved = ""
+				m.syncLayout()
+			} else {
+				m.focus = paneInput
+				m.focusedExIdx = -1
+				m.input.Focus()
+				m.rebuildConvContent()
+			}
+
+		// [DEV] Ctrl+Y: toggle transcribing state for UI testing
+		case key.Matches(msg, keys.DEVToggleTranscribing):
+			m.transcribing = !m.transcribing
+
+		// Tab: fill selected completion into input, or switch voice/text mode
+		case key.Matches(msg, keys.FillCompletion):
+			if len(m.completionItems) > 0 && m.completionIdx >= 0 {
+				m.input.SetValue(m.completionItems[m.completionIdx].cmd + " ")
+				m.input.CursorEnd()
+				m.completionItems = nil
+				m.completionIdx = -1
+				m.syncLayout()
+			} else {
+				// No completion active — toggle interaction mode.
+				if m.mode == modeText {
+					m.mode = modeVoice
+				} else {
+					m.mode = modeText
+				}
+			}
+
+		// Enter: execute completion, confirm pending action, send (input pane), or dismiss (conv pane)
+		case key.Matches(msg, keys.Send):
+			if len(m.completionItems) > 0 && m.completionIdx >= 0 {
+				selected := m.completionItems[m.completionIdx].cmd
+				m.completionItems = nil
+				m.completionIdx = -1
+				m.input.SetValue("")
+				m.syncLayout()
+				val := strings.TrimSpace(selected)
+				if strings.HasPrefix(val, "/") {
+					result := handleCommand(&m, val)
+					if result.quit {
+						m.killTTS()
+						return m, tea.Quit
+					}
+					m.lastCmd = &result
+					m.cmdPaneOpen = true
+					if result.isError {
+						m.focus = paneInput
+						m.input.Focus()
+					} else {
+						m.focus = paneCmd
+						m.input.Blur()
+					}
+					m.rebuildConvContent()
+					m.cmdScroll.SetContent(renderCmdOutput(&m))
+					m.cmdScroll.GotoTop()
+					m.syncLayout()
+				}
+			} else if m.focus == paneCmd && m.pendingAction == nil {
+				m.cmdPaneOpen = false
+				m.lastCmd = nil
+				m.focus = paneInput
+				m.input.Focus()
+				m.syncLayout()
+			} else if m.pendingAction != nil {
+				if strings.ToLower(strings.TrimSpace(m.confirmBuf)) == "yes" {
+					result := m.pendingAction()
+					m.pendingAction = nil
+					m.confirmBuf = ""
+					if m.pendingPost != nil {
+						m.pendingPost(&m)
+						m.pendingPost = nil
+					}
+					m.focusedExIdx = -1
+					m.lastCmd = &result
+					m.rebuildConvContent()
+					m.cmdScroll.SetContent(renderCmdOutput(&m))
+					m.cmdScroll.GotoTop()
+				} else {
+					m.pendingAction = nil
+					m.confirmBuf = ""
+					m.focusedExIdx = -1
+					canceled := cmdResult{input: m.lastCmd.input, output: []string{"operation canceled"}}
+					m.lastCmd = &canceled
+					m.cmdScroll.SetContent(renderCmdOutput(&m))
+					m.cmdScroll.GotoTop()
+				}
+				m.focus = paneInput
+				m.input.Focus()
+				m.rebuildConvContent()
+				m.syncLayout()
+			} else if m.focus == paneConv {
+				m.focus = paneInput
+				m.focusedExIdx = -1
+				m.input.Focus()
+				m.rebuildConvContent()
+			} else if !m.streaming {
+				val := strings.TrimSpace(m.input.Value())
+				if val == "" {
+					m.scrollToBottom()
+				} else if strings.HasPrefix(val, "//") {
+					// Personal note — save to history, never sent to LLM.
+					// If a paste blob is pending, strip the // prefix from the blob
+					// (blob already contains the pre-text including "// ...").
+					var text string
+					if m.pastedBlob != "" {
+						// blob starts with the pre-text, e.g. "// intro\npasted content..."
+						raw := m.pastedBlob
+						m.pastedBlob = ""
+						if strings.HasPrefix(raw, "//") {
+							raw = strings.TrimSpace(raw[2:])
+						}
+						text = raw
+					} else {
+						text = strings.TrimSpace(val[2:])
+					}
+					m.pushHistory(val)
+					m.input.Reset()
+					if text != "" {
+						if err := m.eng.AddNote(text); err == nil {
+							m.exchanges = append(m.exchanges, exchange{
+								userMsg:  core.Message{Role: core.RoleNote, Content: text, Time: time.Now()},
+								isNote:   true,
+								complete: true,
+								expanded: true,
+							})
+							m.rebuildConvContent()
+						}
+					}
+				} else {
+					m.pushHistory(val)
+					if !strings.HasPrefix(val, "/") && looksLikeCommand(val) {
+						val = "/" + val
+					}
+					if strings.HasPrefix(val, "/") {
+						result := handleCommand(&m, val)
+						if result.quit {
+							m.killTTS()
+							return m, tea.Quit
+						}
+						m.lastCmd = &result
+						m.cmdPaneOpen = true
+						m.input.Reset()
+						if result.isError {
+							m.focus = paneInput
+							m.input.Focus()
+						} else {
+							m.focus = paneCmd
+							m.input.Blur()
+						}
+						m.syncLayout()
+						m.cmdScroll.SetContent(renderCmdOutput(&m))
+						m.cmdScroll.GotoTop()
+						// If /play-all queued entries, kick off playback now.
+						if !m.isTTSPlaying() && len(m.ttsQueue) > 0 {
+							next := m.ttsQueue[0]
+							m.ttsQueue = m.ttsQueue[1:]
+							if next < len(m.exchanges) {
+								cmds = append(cmds, startTTS(ttsText(&m.exchanges[next]), next, &m))
+							}
+						}
+					} else {
+						cmds = append(cmds, m.sendMessage())
+					}
+				}
+			}
+
+		// Shift+Enter: newline in input
+		case key.Matches(msg, keys.Newline):
+			if m.focus == paneInput {
+				m.input.InsertString("\n")
+			}
+
+		// Arrow up/down: completion, history in input pane, scroll cmd pane, navigate conv pane, or scroll conv
+		case key.Matches(msg, keys.NavUp):
+			if len(m.completionItems) > 0 {
+				if m.completionIdx > 0 {
+					m.completionIdx--
+				}
+			} else if m.focus == paneInput && m.historyIdx != -1 {
+				// Already browsing — continue going back.
+				if m.historyIdx > 0 {
+					m.historyIdx--
+				}
+				m.input.SetValue(m.inputHistory[m.historyIdx])
+				m.input.CursorEnd()
+			} else if m.focus == paneInput && m.input.Value() == "" && len(m.inputHistory) > 0 {
+				// Start history browsing from an empty input.
+				m.historySaved = ""
+				m.historyIdx = len(m.inputHistory) - 1
+				m.input.SetValue(m.inputHistory[m.historyIdx])
+				m.input.CursorEnd()
+			} else if m.focus == paneCmd {
+				m.cmdScroll.ScrollUp(3)
+			} else if m.focus == paneConv {
+				prev := m.focusedExIdx
+				if m.focusedExIdx < 0 {
+					m.focusedExIdx = len(m.exchanges) - 1
+					m.rebuildConvContent()
+				} else if m.focusedExIdx > 0 {
+					m.focusedExIdx--
+					m.rebuildConvContent()
+				} else {
+					// Already at first exchange — scroll up within it.
+					m.conv.ScrollUp(3)
+				}
+				_ = prev
+			} else {
+				m.userScrolled = true
+				m.conv.ScrollUp(3)
+			}
+
+		case key.Matches(msg, keys.NavDown):
+			if len(m.completionItems) > 0 {
+				if m.completionIdx < len(m.completionItems)-1 {
+					m.completionIdx++
+				}
+			} else if m.focus == paneInput && m.historyIdx != -1 {
+				if m.historyIdx < len(m.inputHistory)-1 {
+					m.historyIdx++
+					m.input.SetValue(m.inputHistory[m.historyIdx])
+					m.input.CursorEnd()
+				} else {
+					// Past the newest: restore draft and exit history mode.
+					m.input.SetValue(m.historySaved)
+					m.input.CursorEnd()
+					m.historyIdx = -1
+					m.historySaved = ""
+				}
+			} else if m.focus == paneCmd {
+				m.cmdScroll.ScrollDown(3)
+			} else if m.focus == paneConv {
+				if m.focusedExIdx >= 0 && m.focusedExIdx < len(m.exchanges)-1 {
+					m.focusedExIdx++
+					m.rebuildConvContent()
+				} else {
+					// Already at last exchange — scroll down within it.
+					m.conv.ScrollDown(3)
+				}
+			} else {
+				m.conv.ScrollDown(3)
+				if m.conv.AtBottom() {
+					m.userScrolled = false
+				}
+			}
+
+		// Page Up/Down: scroll cmd pane or conversation viewport
+		case key.Matches(msg, keys.ScrollUp):
+			if m.focus == paneCmd {
+				m.cmdScroll.HalfPageUp()
+			} else {
+				m.userScrolled = true
+				m.conv.HalfPageUp()
+			}
+
+		case key.Matches(msg, keys.ScrollDown):
+			if m.focus == paneCmd {
+				m.cmdScroll.HalfPageDown()
+			} else {
+				m.conv.HalfPageDown()
+				if m.conv.AtBottom() {
+					m.userScrolled = false
+				}
+			}
+
+		// Ctrl+L: clear screen
+		case key.Matches(msg, keys.ClearScreen):
+			return m, tea.ClearScreen
+
+		// Ctrl+N: toggle focus between input and conversation pane
+		case key.Matches(msg, keys.FocusConv):
+			if m.focus == paneInput {
+				m.focus = paneConv
+				m.input.Blur()
+				if m.focusedExIdx < 0 && len(m.exchanges) > 0 {
+					m.focusedExIdx = len(m.exchanges) - 1
+				}
+				m.rebuildConvContent()
+			} else if m.focus == paneConv {
+				m.focus = paneInput
+				m.focusedExIdx = -1
+				m.input.Focus()
+				m.rebuildConvContent()
+			}
+
+		// Ctrl+T / Ctrl+P: topic/profile switching (stub — popup in future)
+		case key.Matches(msg, keys.SwitchTopic):
+			// TODO: topic picker popup
+		case key.Matches(msg, keys.SwitchProfile):
+			// TODO: profile picker popup
+
+		default:
+			// v/d/s: nav mode actions — only when paneConv is focused.
+			if m.focus == paneConv && m.focusedExIdx >= 0 && msg.Type == tea.KeyRunes {
+				switch string(msg.Runes) {
+				case "s":
+					if m.isTTSPlaying() {
+						// Already playing — stop it and clear queue.
+						m.killTTS()
+						m.rebuildConvContent()
+					} else {
+						exIdx := m.focusedExIdx
+						text := ttsText(&m.exchanges[exIdx])
+						cmds = append(cmds, startTTS(text, exIdx, &m))
+					}
+					return m, tea.Batch(cmds...)
+				case "v":
+					ex := &m.exchanges[m.focusedExIdx]
+					if m.isLongEntry(*ex) {
+						ex.expanded = !ex.expanded
+						m.rebuildConvContent()
+					}
+					return m, tea.Batch(cmds...)
+				case "x":
+					if m.pendingAction == nil {
+						exIdx := m.focusedExIdx
+						eng := m.eng
+						m.pendingAction = func() cmdResult {
+							if err := eng.DeleteAt(exIdx); err != nil {
+								return cmdResult{input: fmt.Sprintf("delete entry #%d", exIdx+1), output: []string{err.Error()}, isError: true}
+							}
+							return cmdResult{input: fmt.Sprintf("delete entry #%d", exIdx+1), output: []string{"deleted"}}
+						}
+						m.pendingPost = func(model *Model) {
+							model.exchanges = append(model.exchanges[:exIdx], model.exchanges[exIdx+1:]...)
+							if model.focusedExIdx >= len(model.exchanges) {
+								model.focusedExIdx = len(model.exchanges) - 1
+							}
+							if len(model.exchanges) == 0 {
+								model.focus = paneInput
+								model.focusedExIdx = -1
+								model.input.Focus()
+							}
+						}
+						m.lastCmd = &cmdResult{
+							input:    fmt.Sprintf("delete entry #%d", exIdx+1),
+							warnLine: fmt.Sprintf("Deleting entry #%d ...", exIdx+1),
+							output:   []string{"[yes] to confirm, other or Esc to cancel:"},
+						}
+						m.cmdPaneOpen = true
+						m.focus = paneCmd
+						m.input.Blur()
+						m.rebuildConvContent()
+						m.syncLayout()
+						m.cmdScroll.SetContent(renderCmdOutput(&m))
+						m.cmdScroll.GotoTop()
+					}
+					return m, tea.Batch(cmds...)
+				}
+			}
+			// Any edit while browsing history exits history mode, keeping current entry.
+			if m.focus == paneInput && m.historyIdx != -1 {
+				m.historyIdx = -1
+				m.historySaved = ""
+			}
+			if m.focus == paneInput && !m.streaming && m.pendingAction == nil {
+				var inputCmd tea.Cmd
+				m.input, inputCmd = m.input.Update(msg)
+				visualH := m.inputVisualHeight()
+				if visualH != m.input.Height() {
+					m.input.SetHeight(visualH)
+				}
+				cmds = append(cmds, inputCmd)
+				// Update completion list based on new input value.
+				val := m.input.Value()
+				if strings.HasPrefix(val, "/") && !strings.Contains(val, " ") {
+					items := filterCompletions(val)
+					if len(items) == 1 && items[0].cmd == val {
+						// Exact match — no need to show completion.
+						items = nil
+					}
+					m.completionItems = items
+					if len(items) > 0 {
+						m.completionIdx = 0 // pre-highlight first match
+					} else {
+						m.completionIdx = -1
+					}
+				} else {
+					m.completionItems = nil
+					m.completionIdx = -1
+				}
+				m.syncLayout()
+				m.cursorVisible = true
+			}
+			if m.pendingAction != nil {
+				switch msg.Type {
+				case tea.KeyRunes:
+					m.confirmBuf += string(msg.Runes)
+					m.cmdScroll.SetContent(renderCmdOutput(&m))
+				case tea.KeyBackspace:
+					if len(m.confirmBuf) > 0 {
+						m.confirmBuf = m.confirmBuf[:len(m.confirmBuf)-1]
+						m.cmdScroll.SetContent(renderCmdOutput(&m))
+					}
+				}
+			}
+		}
+	}
+
+	return m, tea.Batch(cmds...)
+}
+
+// sendMessage takes the current input, sends it to the engine, and returns a Cmd.
+func (m *Model) sendMessage() tea.Cmd {
+	var rawPrompt string
+	isPasted := m.pastedBlob != ""
+	if isPasted {
+		rawPrompt = m.pastedBlob
+		m.pastedBlob = ""
+	} else {
+		rawPrompt = strings.TrimSpace(m.input.Value())
+	}
+	if rawPrompt == "" {
+		return nil
+	}
+
+	// Resolve @ref file injections. Abort on error, show in cmd pane.
+	prompt, err := core.ResolveAtRefs(rawPrompt, m.eng.ResourceDir())
+	if err != nil {
+		m.pastedBlob = "" // clear any pending blob
+		errRes := cmdResult{input: rawPrompt, output: []string{err.Error()}, isError: true}
+		m.lastCmd = &errRes
+		m.cmdPaneOpen = true
+		m.focus = paneInput
+		m.input.Focus()
+		m.syncLayout()
+		m.cmdScroll.SetContent(renderCmdOutput(m))
+		m.cmdScroll.GotoTop()
+		return nil
+	}
+
+	m.input.Reset()
+	m.input.SetHeight(1)
+	m.input.Blur()
+	m.streamSentenceBuf = ""
+	m.ttsPendingSentences = nil
+
+	m.exchanges = append(m.exchanges, exchange{
+		userMsg: core.Message{
+			Role:    core.RoleUser,
+			Content: prompt,
+		},
+		complete: false,
+		isPasted: isPasted,
+		expanded: true,
+	})
+	m.streaming = true
+	m.streamBuf = ""
+	m.userScrolled = false
+	m.rebuildConvContent()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelStream = cancel
+
+	eng := m.eng
+	// Bubbletea Cmds run in a goroutine and return exactly one tea.Msg.
+	// For streaming we use tea.Sequence: each delta token is sent as a
+	// streamDeltaMsg, and the final result as streamDoneMsg. We implement
+	// this by sending deltas via a channel that is drained by a Cmd chain,
+	// but the simplest correct approach with Bubbletea is to use
+	// tea.Program.Send from the goroutine. We access it via a closure
+	// populated by Start().
+	return func() tea.Msg {
+		opts := engine.ChatOptions{}
+		result, err := eng.Chat(ctx, prompt, opts, func(delta string) error {
+			if programSend != nil {
+				programSend(streamDeltaMsg(delta))
+			}
+			return nil
+		})
+		return streamDoneMsg{result: result, err: err}
+	}
+}
+
+// ttsText returns the assistant reply as plain text to speak.
+// Notes speak the note content; regular exchanges speak only the assistant reply.
+func ttsText(ex *exchange) string {
+	if ex.isNote {
+		return ttsStrip(ex.userMsg.Content)
+	}
+	return ttsStrip(ex.asstMsg.Content)
+}
+
+func ttsStrip(s string) string { return core.TTSStrip(s) }
+
+// extractSentences splits s into complete sentences and a leftover remainder.
+// A sentence boundary is .!? followed by whitespace or end of string, with
+// two exceptions to avoid false splits:
+//   - '.' preceded by a digit (decimal: "3.14")
+//   - '.' preceded by a single uppercase letter (abbreviation: "Dr.", "U.S.")
+//
+// Sentences shorter than minSentenceLen runes are merged into the remainder.
+const minSentenceLen = 20
+
+func extractSentences(s string) (sentences []string, remainder string) {
+	runes := []rune(s)
+	n := len(runes)
+	start := 0
+
+	for i := 0; i < n; i++ {
+		ch := runes[i]
+		if ch != '.' && ch != '!' && ch != '?' {
+			continue
+		}
+		// For '.' check abbreviation/decimal exceptions.
+		if ch == '.' && i > 0 {
+			prev := runes[i-1]
+			if prev >= '0' && prev <= '9' {
+				continue // decimal number
+			}
+			if prev >= 'A' && prev <= 'Z' && (i < 2 || runes[i-2] == ' ' || runes[i-2] == '.') {
+				continue // single-letter abbreviation
+			}
+		}
+		// Consume trailing punctuation (e.g. "?!", "...")
+		end := i
+		for end+1 < n && (runes[end+1] == '.' || runes[end+1] == '!' || runes[end+1] == '?') {
+			end++
+		}
+		// Must be followed by whitespace or end of string.
+		if end+1 < n && runes[end+1] != ' ' && runes[end+1] != '\n' && runes[end+1] != '\t' {
+			i = end
+			continue
+		}
+		candidate := strings.TrimSpace(string(runes[start : end+1]))
+		if len([]rune(candidate)) >= minSentenceLen {
+			sentences = append(sentences, candidate)
+			// Skip leading whitespace after the boundary.
+			i = end + 1
+			for i < n && (runes[i] == ' ' || runes[i] == '\n' || runes[i] == '\t') {
+				i++
+			}
+			start = i
+			i-- // loop will i++
+		}
+	}
+	remainder = string(runes[start:])
+	return
+}
+
+// enqueueSentenceTTS appends a sentence to the TTS pipeline.
+// If nothing is playing it starts immediately; otherwise it queues.
+func enqueueSentenceTTS(text, stripped string, exIdx int, m *Model, cmds *[]tea.Cmd) {
+	if stripped == "" {
+		return
+	}
+	if !m.isTTSPlaying() && len(m.ttsPendingSentences) == 0 {
+		*cmds = append(*cmds, startTTS(stripped, exIdx, m))
+	} else {
+		m.ttsPendingSentences = append(m.ttsPendingSentences, ttsPendingItem{text: stripped, exIdx: exIdx})
+	}
+}
+
+// startTTS launches the configured TTS backend for the given text and returns
+// a Cmd that sends ttsDoneMsg when playback finishes.
+func startTTS(text string, exIdx int, m *Model) tea.Cmd {
+	m.ttsGen++
+	gen := m.ttsGen
+	m.ttsExIdx = exIdx
+	m.rebuildConvContent()
+
+	if m.c2cfg.TTSBackend == "kokoro" {
+		return startTTSKokoro(text, gen, m)
+	}
+	return startTTSSay(text, gen, m)
+}
+
+// startTTSSay uses macOS say(1).
+func startTTSSay(text string, gen int, m *Model) tea.Cmd {
+	args := []string{"-r", fmt.Sprintf("%d", m.ttsRate)}
+	if m.c2cfg.TTSVoice != "" {
+		args = append(args, "-v", m.c2cfg.TTSVoice)
+	}
+	cmd := exec.Command("say", args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdin = strings.NewReader(text)
+	m.ttsCmd = cmd
+	return func() tea.Msg {
+		err := cmd.Run()
+		return ttsDoneMsg{err: err, gen: gen}
+	}
+}
+
+// startTTSKokoro uses the sherpa-onnx Kokoro engine.
+func startTTSKokoro(text string, gen int, m *Model) tea.Cmd {
+	// Lazy-initialise the engine on first use.
+	if m.ttsEngine == nil {
+		eng, err := speech.NewTTSEngine(speech.TTSEngineConfig{
+			Model:   m.c2cfg.TTSModel,
+			Voices:  m.c2cfg.TTSVoices,
+			Tokens:  m.c2cfg.TTSTokens,
+			DataDir: m.c2cfg.TTSDataDir,
+			Lexicon: m.c2cfg.TTSLexicon,
+			Lang:    m.c2cfg.TTSVoice, // voice field holds lang tag for Kokoro
+		})
+		if err != nil {
+			return func() tea.Msg { return ttsDoneMsg{err: err, gen: gen} }
+		}
+		m.ttsEngine = eng
+	}
+	stopCh := make(chan struct{})
+	m.ttsKokoroStop = stopCh
+
+	eng := m.ttsEngine
+	speakerID := m.c2cfg.TTSSpeakerID
+	speed := m.c2cfg.TTSSpeed
+	if speed <= 0 {
+		speed = 1.0
+	}
+
+	return func() tea.Msg {
+		samples, err := eng.Generate(text, speakerID, speed)
+		if err != nil {
+			return ttsDoneMsg{err: err, gen: gen}
+		}
+		err = audio.Play(samples, eng.SampleRate, stopCh)
+		return ttsDoneMsg{err: err, gen: gen}
+	}
+}
+
+func calcExchangeCost(r engine.ChatResult, eng *engine.Engine) float64 {
+	inPer1M, outPer1M, ok := config.ExtractPricing(eng.Profile().Info)
+	if !ok {
+		return 0
+	}
+	return config.CalcCost(r.Usage.InputTokens, r.Usage.OutputTokens, inPer1M, outPer1M)
+}

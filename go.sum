@@ -1,0 +1,4 @@
+github.com/gordonklaus/portaudio v0.0.0-20260203164431-765aa7dfa631 h1:8TBHztmhDfAAg34yddptshinXBtDQwgKGlMfdtSFETw=
+github.com/gordonklaus/portaudio v0.0.0-20260203164431-765aa7dfa631/go.mod h1:esZFQEUwqC+l76f2R8bIWSwXMaPbp79PppwZ1eJhFco=
+github.com/k2-fsa/sherpa-onnx-go-macos v1.13.0 h1:35RZb6ZtzDRtSyc8nLlJclxQfHC87pzJwvPjIbqs3E4=
+github.com/k2-fsa/sherpa-onnx-go-macos v1.13.0/go.mod h1:ZOhUAXC62Unj0ZNfu6zxSFKcW96aXf7P3BsqiUyOBbE=

@@ -1,0 +1,89 @@
+// Package c2config reads the "c2" section from ~/.c2/config.json.
+package c2config
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// C2Config holds c2-specific settings from the "c2" key in config.json.
+type C2Config struct {
+	// STT — Whisper model paths
+	STTEncoder  string `json:"stt_encoder"`
+	STTDecoder  string `json:"stt_decoder"`
+	STTTokens   string `json:"stt_tokens"`
+	STTLanguage string `json:"stt_language"` // default "en"
+
+	// VAD
+	VADModel string `json:"vad_model"`
+
+	// TTS — backend selection
+	// TTSBackend selects the engine: "say" (macOS default) or "kokoro" (sherpa-onnx).
+	TTSBackend string `json:"tts_backend"`
+
+	// TTS — Kokoro model paths (used when TTSBackend == "kokoro")
+	TTSModel   string `json:"tts_model"`   // path to model.onnx
+	TTSVoices  string `json:"tts_voices"`  // path to voices.bin
+	TTSTokens  string `json:"tts_tokens"`  // path to tokens.txt
+	TTSDataDir string `json:"tts_data_dir"` // path to espeak-ng-data directory
+	TTSLexicon string `json:"tts_lexicon"` // optional lexicon file path
+
+	// TTS — shared settings
+	TTSVoice      string  `json:"tts_voice"`       // say: voice name (e.g. "Samantha"); kokoro: language tag (e.g. "en-us")
+	TTSSpeakerID  int     `json:"tts_speaker_id"`  // kokoro: speaker index (default 0)
+	TTSSpeed      float32 `json:"tts_speed"`       // say: words/min (default 200); kokoro: speed multiplier (default 1.0)
+
+	// Audio
+	InputDevice string `json:"input_device"`
+}
+
+// Load reads the c2 section from the config file at path.
+// Missing file or missing "c2" key returns a zero-value C2Config without error.
+func Load(configPath string) (C2Config, error) {
+	b, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return C2Config{}, nil
+		}
+		return C2Config{}, fmt.Errorf("c2config: read %s: %w", configPath, err)
+	}
+
+	var raw struct {
+		C2 C2Config `json:"c2"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return C2Config{}, fmt.Errorf("c2config: parse %s: %w", configPath, err)
+	}
+
+	cfg := raw.C2
+	cfg.expand()
+	return cfg, nil
+}
+
+// expand resolves ~ in all path fields.
+func (c *C2Config) expand() {
+	home, _ := os.UserHomeDir()
+	expandPath := func(p string) string {
+		if strings.HasPrefix(p, "~/") {
+			return filepath.Join(home, p[2:])
+		}
+		return p
+	}
+	c.STTEncoder = expandPath(c.STTEncoder)
+	c.STTDecoder = expandPath(c.STTDecoder)
+	c.STTTokens = expandPath(c.STTTokens)
+	c.VADModel = expandPath(c.VADModel)
+	c.TTSModel = expandPath(c.TTSModel)
+	c.TTSVoices = expandPath(c.TTSVoices)
+	c.TTSTokens = expandPath(c.TTSTokens)
+	c.TTSDataDir = expandPath(c.TTSDataDir)
+	c.TTSLexicon = expandPath(c.TTSLexicon)
+}
+
+// IsVoiceConfigured returns true if the minimum required model paths are set.
+func (c *C2Config) IsVoiceConfigured() bool {
+	return c.VADModel != "" && c.STTEncoder != "" && c.STTDecoder != ""
+}

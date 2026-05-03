@@ -9,9 +9,10 @@ import (
 
 	"github.com/mattn/go-isatty"
 
+	"github.com/jrniemiec/c2/c2config"
+	"github.com/jrniemiec/c2/tui"
 	"github.com/jrniemiec/lore/config"
 	"github.com/jrniemiec/lore/engine"
-	"github.com/jrniemiec/lore/tui"
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z".
@@ -250,6 +251,12 @@ func run() int {
 		return 1
 	}
 
+	c2cfg, err := c2config.Load(cfgPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "c2config: %v\n", err)
+		return 1
+	}
+
 	topicName := config.EffectiveTopic(cfg, flagTopic)
 	e, err := engine.New(cfg, cfgPath, loreData, topicName, flagProfile)
 	if err != nil {
@@ -262,7 +269,7 @@ func run() int {
 			return 1
 		}
 	}
-	if err := tui.Start(e, cfg, loreData, flagTheme, chatLabels, foldLines, foldOnStart); err != nil {
+	if err := tui.Start(e, cfg, loreData, c2cfg, flagTheme, chatLabels, foldLines, foldOnStart); err != nil {
 		fmt.Fprintf(os.Stderr, "tui: %v\n", err)
 		return 1
 	}

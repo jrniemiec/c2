@@ -4,7 +4,7 @@ LDFLAGS ?= -X main.version=$(VERSION)
 BINARY  := c2
 INSTALL := $(HOME)/dev/bin/$(BINARY)
 
-.PHONY: build install test fmt vet clean
+.PHONY: build install run test fmt vet clean
 
 build:
 	@mkdir -p bin
@@ -13,6 +13,9 @@ build:
 install: test build
 	cp bin/$(BINARY) $(INSTALL)
 	@echo "Installed: $(INSTALL)"
+
+run: build
+	bin/$(BINARY)
 
 test:
 	$(GO) test ./...

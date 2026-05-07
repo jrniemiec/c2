@@ -70,6 +70,7 @@ type voiceTranscriptMsg struct {
 }
 type voicePipelineErrMsg struct{ err error } // pipeline failed to start or crashed
 type voiceAutoSubmitMsg struct{}              // fires 500ms after transcript to auto-send
+type clipboardFlashMsg struct{}              // fires 1.5s after copy to clear the flash
 
 // Model is the root Bubbletea application model.
 type Model struct {
@@ -101,7 +102,8 @@ type Model struct {
 	cancelStream context.CancelFunc
 
 	// spinner: pulsating snowflake ❄ bold/dim alternating
-	spinnerFrame int
+	spinnerFrame  int
+	windowFocused bool // true when the terminal window has OS focus
 	// cursor blink: toggled on every spinner tick (400 ms → 800 ms period)
 	cursorVisible bool
 
@@ -139,15 +141,29 @@ type Model struct {
 	pastedBlob string // full text to send; empty = not in paste mode
 
 	// c2 interaction mode
-	mode             interactionMode
-	transcribing     bool // true while VAD/STT is processing speech
-	modeIndicatorCol int  // start column of mode indicator in top bar (for mouse click)
+	mode         interactionMode
+	transcribing bool // true while VAD/STT is processing speech
 
 	// voice pipeline (non-nil when voice mode has been initialised)
 	voiceReady          bool         // true if VAD+STT loaded successfully
 	voiceErr            string       // non-empty if pipeline failed to init
 	stopVoice           chan struct{} // closed to stop the capture goroutine
 	pendingVoiceSubmit  bool         // true while 500ms auto-submit timer is running
+
+	// voice FSM
+	voiceState       VoiceState
+	voiceReturnState VoiceState       // state to return to if AWAKE fails (timeout/unrecognized)
+	deletingExIdx    int              // index of entry being voice-deleted (-1 = none)
+	voiceFailCount   int              // consecutive STT misses in current AWAKE session
+	stateChangeCh    chan VoiceState  // TUI → pipeline; buffered 1
+	voiceFlushCh     chan struct{}    // TUI → pipeline: flush accumulated audio now ("over")
+	awakeTimer      *time.Timer      // 5s timeout in AWAKE state
+	executingTimer  *time.Timer      // 5s timeout in EXECUTING state
+	suspended       *suspendedTTS    // non-nil when TTS was interrupted by "computer"
+	voiceSession    bool             // true while in continuous conversation (VoiceConversing)
+	// pendingDictCmd holds the action to take when DICTATING completes.
+	// "llm" = submit to LLM, "note" = save as note, "" = none
+	pendingDictCmd  string
 
 	// TTS playback
 	ttsCmd          *exec.Cmd         // non-nil while say(1) TTS is playing
@@ -166,6 +182,10 @@ type Model struct {
 	// command completion (active when input starts with /)
 	completionItems []completionEntry // filtered list
 	completionIdx   int               // highlighted row (-1 = none)
+
+	// contextual parameter picker (active when input is "/cmd " with no arg yet)
+	paramItems []string // candidate values (e.g. topic names, profile names)
+	paramIdx   int      // highlighted row (-1 = none)
 }
 
 // ttsPendingItem is a sentence queued for sentence-streaming TTS playback.
@@ -223,10 +243,12 @@ func New(eng *engine.Engine, cfg config.Config, loreData string) Model {
 		input:         ta,
 		focus:         paneInput,
 		focusedExIdx:  -1,
+		deletingExIdx: -1,
 		historyIdx:    -1,
 		ttsExIdx:      -1,
 		ttsRate:       200,
 		cursorVisible: true,
+		windowFocused: true,
 		themeMode:     "auto",
 	}
 	m.cmdScroll = viewport.New(0, 0)
@@ -238,7 +260,7 @@ func New(eng *engine.Engine, cfg config.Config, loreData string) Model {
 
 // Init starts the spinner ticker. Cursor blink is driven by spinnerTick.
 func (m Model) Init() tea.Cmd {
-	return spinnerTick()
+	return tea.Batch(spinnerTick(), tea.EnableReportFocus)
 }
 
 func spinnerTick() tea.Cmd {
@@ -384,6 +406,17 @@ func (m *Model) cmdPaneHeight() int {
 	if len(m.completionItems) > 0 {
 		return 1 + len(m.completionItems) // header + one row per match
 	}
+	if len(m.paramItems) > 0 {
+		h := len(m.paramItems)
+		max := m.height * 30 / 100
+		if max < 3 {
+			max = 3
+		}
+		if h > max {
+			h = max
+		}
+		return h
+	}
 	if !m.cmdPaneOpen || m.lastCmd == nil {
 		return 1
 	}
@@ -475,6 +508,50 @@ func (m *Model) killTTS() {
 	if m.ttsKokoroStop != nil {
 		close(m.ttsKokoroStop)
 		m.ttsKokoroStop = nil
+	}
+}
+
+// suspendTTS stops audio playback but saves the pending sentence queue and
+// stream buffer so that resumeTTS can restore them. Unlike killTTS it does
+// not discard the queue.
+func (m *Model) suspendTTS() {
+	m.suspended = &suspendedTTS{
+		sentences: m.ttsPendingSentences,
+		streamBuf: m.streamSentenceBuf,
+	}
+	m.ttsPendingSentences = nil
+	m.streamSentenceBuf = ""
+	// Stop audio output without discarding the queue (already moved above).
+	m.ttsExIdx = -1
+	if m.ttsCmd != nil {
+		cmd := m.ttsCmd
+		m.ttsCmd = nil
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	}
+	if m.ttsKokoroStop != nil {
+		close(m.ttsKokoroStop)
+		m.ttsKokoroStop = nil
+	}
+}
+
+// resumeTTS restores a previously suspended TTS queue and restarts playback.
+// Does nothing if there was no suspension.
+func (m *Model) resumeTTS() {
+	if m.suspended == nil {
+		return
+	}
+	m.ttsPendingSentences = m.suspended.sentences
+	m.streamSentenceBuf = m.suspended.streamBuf
+	m.suspended = nil
+	// Drain the restored queue: start playing the first pending sentence.
+	if len(m.ttsPendingSentences) > 0 {
+		next := m.ttsPendingSentences[0]
+		m.ttsPendingSentences = m.ttsPendingSentences[1:]
+		m.ttsExIdx = next.exIdx
+		m.ttsGen++
+		startTTS(next.text, next.exIdx, m)
 	}
 }
 

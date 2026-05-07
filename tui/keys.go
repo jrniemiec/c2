@@ -18,6 +18,7 @@ type keyMap struct {
 	FocusConv     key.Binding
 	FillCompletion key.Binding
 	SwitchMode        key.Binding
+	CopyToClipboard       key.Binding
 	DEVToggleTranscribing key.Binding // dev-only: simulate transcribing state
 }
 
@@ -77,6 +78,10 @@ var keys = keyMap{
 	SwitchMode: key.NewBinding(
 		key.WithKeys("tab"),
 		key.WithHelp("tab", "switch voice/text mode"),
+	),
+	CopyToClipboard: key.NewBinding(
+		key.WithKeys("ctrl+s"),
+		key.WithHelp("ctrl+s", "copy to clipboard"),
 	),
 	DEVToggleTranscribing: key.NewBinding(
 		key.WithKeys("ctrl+y"),

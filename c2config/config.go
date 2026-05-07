@@ -36,6 +36,14 @@ type C2Config struct {
 	TTSSpeakerID  int     `json:"tts_speaker_id"`  // kokoro: speaker index (default 0)
 	TTSSpeed      float32 `json:"tts_speed"`       // say: words/min (default 200); kokoro: speed multiplier (default 1.0)
 
+	// KWS — KeywordSpotter (transducer) model paths
+	KWSEncoder  string  `json:"kws_encoder"`
+	KWSDecoder  string  `json:"kws_decoder"`
+	KWSJoiner   string  `json:"kws_joiner"`
+	KWSTokens   string  `json:"kws_tokens"`
+	KWSKeywords string  `json:"kws_keywords"` // path to c2_keywords.txt
+	KWSGain     float32 `json:"kws_gain"`     // amplitude multiplier for KWS input (0 = disabled)
+
 	// Audio
 	InputDevice string `json:"input_device"`
 }
@@ -81,9 +89,20 @@ func (c *C2Config) expand() {
 	c.TTSTokens = expandPath(c.TTSTokens)
 	c.TTSDataDir = expandPath(c.TTSDataDir)
 	c.TTSLexicon = expandPath(c.TTSLexicon)
+	c.KWSEncoder = expandPath(c.KWSEncoder)
+	c.KWSDecoder = expandPath(c.KWSDecoder)
+	c.KWSJoiner = expandPath(c.KWSJoiner)
+	c.KWSTokens = expandPath(c.KWSTokens)
+	c.KWSKeywords = expandPath(c.KWSKeywords)
 }
 
 // IsVoiceConfigured returns true if the minimum required model paths are set.
 func (c *C2Config) IsVoiceConfigured() bool {
 	return c.VADModel != "" && c.STTEncoder != "" && c.STTDecoder != ""
+}
+
+// IsKWSConfigured returns true if all KWS model paths are set.
+func (c *C2Config) IsKWSConfigured() bool {
+	return c.KWSEncoder != "" && c.KWSDecoder != "" && c.KWSJoiner != "" &&
+		c.KWSTokens != "" && c.KWSKeywords != ""
 }

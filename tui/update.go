@@ -19,6 +19,14 @@ import (
 )
 
 // Update handles all incoming messages.
+
+func (m *Model) setFocus(pane focusPane) {
+	if m.focus == paneInput && pane != paneInput {
+		m.input.Blur()
+	}
+	m.focus = pane
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -32,14 +40,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		m.rebuildConvContent()
 
+	// --- window focus/blur ---
+	case tea.FocusMsg:
+		m.windowFocused = true
+
+	case tea.BlurMsg:
+		m.windowFocused = false
+		m.cursorVisible = false
+
 	// --- spinner tick ---
 	case spinnerTickMsg:
 		m.spinnerFrame++
-		// Cursor blinks at ~400ms (every 4 ticks of 100ms).
+		// Cursor blinks at ~400ms (every 4 ticks of 100ms), only when window and input pane focused.
 		if m.spinnerFrame%4 == 0 {
-			m.cursorVisible = !m.cursorVisible
+			if m.focus == paneInput && m.windowFocused {
+				m.cursorVisible = !m.cursorVisible
+			} else {
+				m.cursorVisible = false
+			}
 		}
-		if m.streaming || m.isTTSPlaying() {
+		if m.streaming || m.isTTSPlaying() || m.transcribing {
 			m.rebuildConvContent()
 		}
 		cmds = append(cmds, spinnerTick())
@@ -105,6 +125,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.streamBuf = ""
 		m.streamSentenceBuf = ""
+		// If in a voice session with TTS off (or nothing queued), return to
+		// CONVERSING immediately. With TTS on, ttsDoneMsg handles the return.
+		if m.voiceSession && m.voiceState == VoiceExecuting {
+			if !m.ttsAuto && !m.isTTSPlaying() {
+				if m.executingTimer != nil {
+					m.executingTimer.Stop()
+					m.executingTimer = nil
+				}
+				m.setVoiceState(VoiceConversing)
+			}
+		}
 		m.rebuildConvContent()
 		m.input.Focus()
 
@@ -114,34 +145,153 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.voiceErr = msg.err.Error()
 		m.voiceReady = false
 
+	case voiceKWSEventMsg:
+		cmds = append(cmds, m.handleKWSEvent(msg.keyword)...)
+
+	case voiceAwakeTimeoutMsg:
+		if m.voiceState == VoiceAwake {
+			dbg("fsm: AWAKE timeout → %s", m.voiceReturnState)
+			m.setVoiceState(m.voiceReturnState)
+			go playBeep(beepUnrecognized)
+		}
+
+	case voiceExecutingTimeoutMsg:
+		if m.voiceState == VoiceExecuting {
+			dbg("fsm: EXECUTING timeout → IDLE")
+			m.setVoiceState(VoiceIdle)
+			go playBeep(beepUnrecognized)
+		}
+
+	case clipboardFlashMsg:
+		if m.cmdPaneOpen && m.pendingAction == nil && m.lastCmd != nil && m.lastCmd.input == "copy" {
+			m.cmdPaneOpen = false
+			m.lastCmd = nil
+			m.syncLayout()
+		}
+
 	case voiceSpeechStartedMsg:
-		// Only act if we're in voice mode.
-		if m.mode == modeVoice {
+		// Arm transcribing indicator in any speech-capture state.
+		if m.voiceState == VoiceDictating || m.voiceState == VoiceConversing || m.voiceState == VoiceAwake {
 			m.transcribing = true
 			m.pendingVoiceSubmit = false
-			m.input.SetValue("")
-			// Stop TTS playback so it doesn't talk over the user.
-			m.killTTS()
+			// Clear input in AWAKE only when coming from IDLE — fresh command slate.
+			// If we entered AWAKE by interrupting DICTATING/CONVERSING, preserve
+			// whatever the user had typed so far.
+			if m.voiceState == VoiceAwake && m.voiceReturnState == VoiceIdle {
+				m.input.SetValue("")
+			}
 		}
 
 	case voiceTranscriptMsg:
-		if m.mode == modeVoice {
-			m.transcribing = false
-			if msg.text != "" {
-				m.input.SetValue(msg.text)
-				m.input.CursorEnd()
+		m.transcribing = false
+		switch m.voiceState {
+		case VoiceAwake:
+			// Match transcript against command synonym table.
+			// Filter Whisper hallucinations like "[BLANK_AUDIO]", "[inaudible]", etc.
+			if msg.text == "" || strings.HasPrefix(strings.TrimSpace(msg.text), "[") {
+				break
+			}
+			if label := matchVoiceCommand(msg.text); label != "" {
+				dbg("fsm: STT command match %q → %q", msg.text, label)
+				if m.awakeTimer != nil {
+					m.awakeTimer.Stop()
+					m.awakeTimer = nil
+				}
+				cmds = append(cmds, m.executeAwakeCommand(label)...)
+			} else {
+				// No command match — increment fail counter.
+				m.voiceFailCount++
+				dbg("fsm: STT no command match for %q, fail=%d", msg.text, m.voiceFailCount)
 				m.syncLayout()
-				// Schedule auto-submit after 500ms.
-				m.pendingVoiceSubmit = true
-				cmds = append(cmds, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
-					return voiceAutoSubmitMsg{}
-				}))
+				if m.voiceFailCount >= 3 {
+					// Third miss — give up, return to previous state.
+					if m.awakeTimer != nil {
+						m.awakeTimer.Stop()
+						m.awakeTimer = nil
+					}
+					m.voiceFailCount = 0
+					m.setVoiceState(m.voiceReturnState)
+					go playBeep(beepUnrecognized)
+				} else {
+					// Stay in AWAKE, reset the timer, prompt the user.
+					if m.awakeTimer != nil {
+						m.awakeTimer.Stop()
+					}
+					m.awakeTimer = time.AfterFunc(awakeTimeout, func() {
+						if programSend != nil {
+							programSend(voiceAwakeTimeoutMsg{})
+						}
+					})
+					n := m.voiceFailCount
+					go sayPrompt(n)
+				}
+			}
+		case VoiceDictating, VoiceConversing:
+			if msg.text != "" {
+				// Check for clear_input command mid-dictation.
+				if label := matchVoiceCommand(msg.text); label == "clear_input" {
+					m.input.SetValue("")
+					m.input.CursorEnd()
+					m.syncLayout()
+					go playBeep(beepDictStart)
+					break
+				}
+
+				// Append segment to whatever is already in the input — the user
+				// sees transcription building up. Submission happens on "over".
+				existing := strings.TrimSpace(m.input.Value())
+				segment := strings.TrimRight(strings.TrimSpace(msg.text), ".!?,;:")
+
+				// Detect "over" at end of segment — submission trigger.
+				submitNow := false
+				segLower := strings.ToLower(segment)
+				if segLower == "over" {
+					segment = ""
+					submitNow = true
+				} else if strings.HasSuffix(segLower, " over") {
+					segment = strings.TrimSpace(segment[:len(segment)-len(" over")])
+					submitNow = true
+				}
+
+				if segment != "" {
+					if existing != "" {
+						m.input.SetValue(existing + " " + segment)
+					} else {
+						m.input.SetValue(segment)
+					}
+					m.input.CursorEnd()
+					m.syncLayout()
+				}
+
+				if submitNow {
+					if strings.TrimSpace(m.input.Value()) != "" {
+						m.pendingVoiceSubmit = true
+						cmds = append(cmds, tea.Tick(0, func(time.Time) tea.Msg {
+							return voiceAutoSubmitMsg{}
+						}))
+					}
+				}
 			}
 		}
 
 	case voiceAutoSubmitMsg:
-		if m.pendingVoiceSubmit && m.mode == modeVoice && !m.streaming {
-			m.pendingVoiceSubmit = false
+		if !m.pendingVoiceSubmit || m.streaming {
+			break
+		}
+		m.pendingVoiceSubmit = false
+		m.transcribing = false
+		switch m.voiceState {
+		case VoiceDictating:
+			go playBeep(beepDictEnd)
+			switch m.pendingDictCmd {
+			case "note":
+				cmds = append(cmds, m.saveVoiceNote())
+			default: // "llm" or empty → submit to LLM
+				m.setVoiceState(VoiceExecuting)
+				cmds = append(cmds, m.sendMessage())
+			}
+		case VoiceConversing:
+			m.setVoiceState(VoiceExecuting)
 			cmds = append(cmds, m.sendMessage())
 		}
 
@@ -164,6 +314,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if next < len(m.exchanges) {
 				cmds = append(cmds, startTTS(ttsText(&m.exchanges[next]), next, &m))
 			}
+		} else if m.voiceSession && m.voiceState == VoiceExecuting && !m.streaming {
+			// All TTS drained and stream complete — return to listening in a continuous session.
+			if m.executingTimer != nil {
+				m.executingTimer.Stop()
+				m.executingTimer = nil
+			}
+			m.setVoiceState(VoiceConversing)
 		}
 		m.rebuildConvContent()
 
@@ -177,15 +334,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.conv.ScrollDown(3)
 			if m.conv.AtBottom() {
 				m.userScrolled = false
-			}
-		case tea.MouseButtonLeft:
-			// Click on the mode indicator in the top bar (row 0) toggles mode.
-			if msg.Y == 0 && m.modeIndicatorCol > 0 && msg.X >= m.modeIndicatorCol {
-				if m.mode == modeText {
-					m.mode = modeVoice
-				} else {
-					m.mode = modeText
-				}
 			}
 		}
 
@@ -220,12 +368,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 
-		// Tab with no active completion → toggle voice/text mode before textarea sees it.
-		if msg.Type == tea.KeyTab && len(m.completionItems) == 0 {
-			if m.mode == modeText {
-				m.mode = modeVoice
-			} else {
-				m.mode = modeText
+		// Tab with no active completion → toggle focus between input and conv pane.
+		if msg.Type == tea.KeyTab && len(m.completionItems) == 0 && len(m.paramItems) == 0 {
+			if m.focus == paneInput {
+				m.setFocus(paneConv)
+				m.input.Blur()
+				if m.focusedExIdx < 0 && len(m.exchanges) > 0 {
+					m.focusedExIdx = len(m.exchanges) - 1
+				}
+				m.rebuildConvContent()
+			} else if m.focus == paneConv {
+				m.setFocus(paneInput)
+				m.focusedExIdx = -1
+				m.input.Focus()
+				m.rebuildConvContent()
 			}
 			return m, tea.Batch(cmds...)
 		}
@@ -259,6 +415,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncLayout()
 		}
 
+		completionHandled := false
 		switch {
 
 		// Ctrl+C: stop TTS, cancel stream, or quit
@@ -282,7 +439,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Esc: exit completion, cancel pending action, collapse cmd pane, or return focus to input
 		case key.Matches(msg, keys.Dismiss):
-			if len(m.completionItems) > 0 {
+			if len(m.paramItems) > 0 {
+				m.paramItems = nil
+				m.paramIdx = -1
+				m.syncLayout()
+			} else if len(m.completionItems) > 0 {
 				m.completionItems = nil
 				m.completionIdx = -1
 				m.syncLayout()
@@ -291,18 +452,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingPost = nil
 				m.confirmBuf = ""
 				m.focusedExIdx = -1
+				m.deletingExIdx = -1
 				canceled := cmdResult{input: m.lastCmd.input, output: []string{"operation canceled"}}
 				m.lastCmd = &canceled
 				m.cmdScroll.SetContent(renderCmdOutput(&m))
 				m.cmdScroll.GotoTop()
-				m.focus = paneInput
+				m.setFocus(paneInput)
 				m.input.Focus()
 				m.rebuildConvContent()
 				m.syncLayout()
 			} else if m.cmdPaneOpen {
 				m.cmdPaneOpen = false
 				m.lastCmd = nil
-				m.focus = paneInput
+				m.setFocus(paneInput)
 				m.input.Focus()
 				m.syncLayout()
 			} else if m.focus == paneInput && m.input.Value() != "" {
@@ -315,7 +477,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.historySaved = ""
 				m.syncLayout()
 			} else {
-				m.focus = paneInput
+				m.setFocus(paneInput)
 				m.focusedExIdx = -1
 				m.input.Focus()
 				m.rebuildConvContent()
@@ -327,24 +489,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Tab: fill selected completion into input, or switch voice/text mode
 		case key.Matches(msg, keys.FillCompletion):
-			if len(m.completionItems) > 0 && m.completionIdx >= 0 {
-				m.input.SetValue(m.completionItems[m.completionIdx].cmd + " ")
+			if len(m.paramItems) > 0 && m.paramIdx >= 0 {
+				// Fill selected parameter value into the input.
+				cmd := strings.TrimSpace(m.input.Value())
+				m.input.SetValue(cmd + " " + m.paramItems[m.paramIdx])
+				m.input.CursorEnd()
+				m.paramItems = nil
+				m.paramIdx = -1
+				completionHandled = true
+				m.syncLayout()
+			} else if len(m.completionItems) > 0 && m.completionIdx >= 0 {
+				filled := m.completionItems[m.completionIdx].cmd + " "
+				m.input.SetValue(filled)
 				m.input.CursorEnd()
 				m.completionItems = nil
 				m.completionIdx = -1
-				m.syncLayout()
-			} else {
-				// No completion active — toggle interaction mode.
-				if m.mode == modeText {
-					m.mode = modeVoice
+				// Immediately show param picker if this command supports it.
+				items := contextualParams(&m, strings.TrimSpace(filled))
+				m.paramItems = items
+				if len(items) > 0 {
+					m.paramIdx = 0
 				} else {
-					m.mode = modeText
+					m.paramIdx = -1
 				}
+				completionHandled = true
+				m.syncLayout()
 			}
 
 		// Enter: execute completion, confirm pending action, send (input pane), or dismiss (conv pane)
 		case key.Matches(msg, keys.Send):
-			if len(m.completionItems) > 0 && m.completionIdx >= 0 {
+			if len(m.paramItems) > 0 && m.paramIdx >= 0 {
+				// Fill selected parameter value into the input — don't execute yet.
+				cmd := strings.TrimSpace(m.input.Value())
+				m.input.SetValue(cmd + " " + m.paramItems[m.paramIdx])
+				m.input.CursorEnd()
+				m.paramItems = nil
+				m.paramIdx = -1
+				m.input.Focus()
+				m.syncLayout()
+			} else if len(m.completionItems) > 0 && m.completionIdx >= 0 {
 				selected := m.completionItems[m.completionIdx].cmd
 				m.completionItems = nil
 				m.completionIdx = -1
@@ -360,10 +543,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.lastCmd = &result
 					m.cmdPaneOpen = true
 					if result.isError {
-						m.focus = paneInput
+						m.setFocus(paneInput)
 						m.input.Focus()
 					} else {
-						m.focus = paneCmd
+						m.setFocus(paneCmd)
 						m.input.Blur()
 					}
 					m.rebuildConvContent()
@@ -374,7 +557,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.focus == paneCmd && m.pendingAction == nil {
 				m.cmdPaneOpen = false
 				m.lastCmd = nil
-				m.focus = paneInput
+				m.setFocus(paneInput)
 				m.input.Focus()
 				m.syncLayout()
 			} else if m.pendingAction != nil {
@@ -395,17 +578,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.pendingAction = nil
 					m.confirmBuf = ""
 					m.focusedExIdx = -1
+					m.deletingExIdx = -1
 					canceled := cmdResult{input: m.lastCmd.input, output: []string{"operation canceled"}}
 					m.lastCmd = &canceled
 					m.cmdScroll.SetContent(renderCmdOutput(&m))
 					m.cmdScroll.GotoTop()
 				}
-				m.focus = paneInput
+				m.setFocus(paneInput)
 				m.input.Focus()
 				m.rebuildConvContent()
 				m.syncLayout()
 			} else if m.focus == paneConv {
-				m.focus = paneInput
+				m.setFocus(paneInput)
 				m.focusedExIdx = -1
 				m.input.Focus()
 				m.rebuildConvContent()
@@ -457,10 +641,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.cmdPaneOpen = true
 						m.input.Reset()
 						if result.isError {
-							m.focus = paneInput
+							m.setFocus(paneInput)
 							m.input.Focus()
 						} else {
-							m.focus = paneCmd
+							m.setFocus(paneCmd)
 							m.input.Blur()
 						}
 						m.syncLayout()
@@ -488,7 +672,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Arrow up/down: completion, history in input pane, scroll cmd pane, navigate conv pane, or scroll conv
 		case key.Matches(msg, keys.NavUp):
-			if len(m.completionItems) > 0 {
+			if len(m.paramItems) > 0 {
+				if m.paramIdx > 0 {
+					m.paramIdx--
+				}
+			} else if len(m.completionItems) > 0 {
 				if m.completionIdx > 0 {
 					m.completionIdx--
 				}
@@ -526,7 +714,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, keys.NavDown):
-			if len(m.completionItems) > 0 {
+			if len(m.paramItems) > 0 {
+				if m.paramIdx < len(m.paramItems)-1 {
+					m.paramIdx++
+				}
+			} else if len(m.completionItems) > 0 {
 				if m.completionIdx < len(m.completionItems)-1 {
 					m.completionIdx++
 				}
@@ -578,6 +770,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
+		// Ctrl+S: copy input or focused exchange to clipboard
+		case key.Matches(msg, keys.CopyToClipboard):
+			var text string
+			if m.focus == paneConv && m.focusedExIdx >= 0 {
+				ex := m.exchanges[m.focusedExIdx]
+				text = ex.userMsg.Content
+				if ex.asstMsg.Content != "" {
+					text += "\n\n" + ex.asstMsg.Content
+				}
+			} else {
+				text = m.input.Value()
+			}
+			if text != "" {
+				cmd := exec.Command("pbcopy")
+				cmd.Stdin = strings.NewReader(text)
+				_ = cmd.Run()
+				m.lastCmd = &cmdResult{input: "copy", output: []string{"copied to clipboard"}}
+				m.cmdPaneOpen = true
+				m.cmdScroll.SetContent(renderCmdOutput(&m))
+				m.cmdScroll.GotoTop()
+				m.syncLayout()
+				cmds = append(cmds, tea.Tick(1500*time.Millisecond, func(t time.Time) tea.Msg {
+					return clipboardFlashMsg{}
+				}))
+			}
+			return m, tea.Batch(cmds...)
+
 		// Ctrl+L: clear screen
 		case key.Matches(msg, keys.ClearScreen):
 			return m, tea.ClearScreen
@@ -585,14 +804,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Ctrl+N: toggle focus between input and conversation pane
 		case key.Matches(msg, keys.FocusConv):
 			if m.focus == paneInput {
-				m.focus = paneConv
+				m.setFocus(paneConv)
 				m.input.Blur()
 				if m.focusedExIdx < 0 && len(m.exchanges) > 0 {
 					m.focusedExIdx = len(m.exchanges) - 1
 				}
 				m.rebuildConvContent()
 			} else if m.focus == paneConv {
-				m.focus = paneInput
+				m.setFocus(paneInput)
 				m.focusedExIdx = -1
 				m.input.Focus()
 				m.rebuildConvContent()
@@ -653,7 +872,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							output:   []string{"[yes] to confirm, other or Esc to cancel:"},
 						}
 						m.cmdPaneOpen = true
-						m.focus = paneCmd
+						m.setFocus(paneCmd)
 						m.input.Blur()
 						m.rebuildConvContent()
 						m.syncLayout()
@@ -668,7 +887,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.historyIdx = -1
 				m.historySaved = ""
 			}
-			if m.focus == paneInput && !m.streaming && m.pendingAction == nil {
+			if !completionHandled && m.focus == paneInput && !m.streaming && m.pendingAction == nil {
 				var inputCmd tea.Cmd
 				m.input, inputCmd = m.input.Update(msg)
 				visualH := m.inputVisualHeight()
@@ -681,8 +900,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if strings.HasPrefix(val, "/") && !strings.Contains(val, " ") {
 					items := filterCompletions(val)
 					if len(items) == 1 && items[0].cmd == val {
-						// Exact match — no need to show completion.
+						// Exact match — hide completion list, show param picker immediately.
 						items = nil
+						params := contextualParams(&m, val)
+						m.paramItems = params
+						if len(params) > 0 {
+							m.paramIdx = 0
+						} else {
+							m.paramIdx = -1
+						}
+					} else {
+						m.paramItems = nil
+						m.paramIdx = -1
 					}
 					m.completionItems = items
 					if len(items) > 0 {
@@ -690,9 +919,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else {
 						m.completionIdx = -1
 					}
+				} else if strings.HasPrefix(val, "/") && strings.HasSuffix(val, " ") {
+					// "/cmd " with trailing space and no argument yet — show param picker.
+					cmd := strings.ToLower(strings.TrimSpace(val))
+					items := contextualParams(&m, cmd)
+					m.paramItems = items
+					if len(items) > 0 {
+						m.paramIdx = 0
+					} else {
+						m.paramIdx = -1
+					}
+					m.completionItems = nil
+					m.completionIdx = -1
 				} else {
 					m.completionItems = nil
 					m.completionIdx = -1
+					m.paramItems = nil
+					m.paramIdx = -1
 				}
 				m.syncLayout()
 				m.cursorVisible = true
@@ -736,7 +979,7 @@ func (m *Model) sendMessage() tea.Cmd {
 		errRes := cmdResult{input: rawPrompt, output: []string{err.Error()}, isError: true}
 		m.lastCmd = &errRes
 		m.cmdPaneOpen = true
-		m.focus = paneInput
+		m.setFocus(paneInput)
 		m.input.Focus()
 		m.syncLayout()
 		m.cmdScroll.SetContent(renderCmdOutput(m))
@@ -931,6 +1174,559 @@ func startTTSKokoro(text string, gen int, m *Model) tea.Cmd {
 		err = audio.Play(samples, eng.SampleRate, stopCh)
 		return ttsDoneMsg{err: err, gen: gen}
 	}
+}
+
+// setVoiceState updates the FSM state in the model and notifies the pipeline.
+func (m *Model) setVoiceState(s VoiceState) {
+	dbg("fsm: %s → %s", m.voiceState, s)
+	m.voiceState = s
+	if m.stateChangeCh != nil {
+		// Non-blocking send: pipeline drains this before the next audio chunk.
+		select {
+		case m.stateChangeCh <- s:
+		default:
+			// Overwrite: drain old value then send new.
+			select {
+			case <-m.stateChangeCh:
+			default:
+			}
+			m.stateChangeCh <- s
+		}
+	}
+}
+
+// awakeTimeout is how long the FSM waits in AWAKE state before returning to the previous state.
+const awakeTimeout = 20 * time.Second
+
+// handleKWSEvent is the main FSM dispatch for keyword events.
+func (m *Model) handleKWSEvent(keyword string) []tea.Cmd {
+	// Filter by the active keyword set for this state.
+	if !m.voiceState.activeKeywords()[keyword] {
+		dbg("fsm: keyword %q ignored in state %s", keyword, m.voiceState)
+		return nil
+	}
+	dbg("fsm: keyword=%q state=%s", keyword, m.voiceState)
+
+	var cmds []tea.Cmd
+
+	cancelTimer := func(t **time.Timer) {
+		if *t != nil {
+			(*t).Stop()
+			*t = nil
+		}
+	}
+	startAwakeTimer := func() {
+		cancelTimer(&m.awakeTimer)
+		m.awakeTimer = time.AfterFunc(5*time.Second, func() {
+			if programSend != nil {
+				programSend(voiceAwakeTimeoutMsg{})
+			}
+		})
+	}
+	switch m.voiceState {
+
+	case VoiceIdle:
+		if keyword == "computer" {
+			m.suspendTTS()
+			m.voiceReturnState = VoiceIdle
+			m.voiceFailCount = 0
+			m.setVoiceState(VoiceAwake)
+			startAwakeTimer()
+			go playBeep(beepWakeAck)
+		}
+
+	case VoiceAwake:
+		cancelTimer(&m.awakeTimer)
+		if keyword == "computer" {
+			// Re-wake: reset the timer.
+			startAwakeTimer()
+			go playBeep(beepWakeAck)
+		} else {
+			cmds = append(cmds, m.executeAwakeCommand(keyword)...)
+		}
+
+	case VoiceDictating:
+		switch keyword {
+		case "computer":
+			// Interrupt → AWAKE; preserve input and dictation intent.
+			m.pendingVoiceSubmit = false
+			m.voiceReturnState = VoiceDictating
+			m.voiceFailCount = 0
+			m.setVoiceState(VoiceAwake)
+			cancelTimer(&m.awakeTimer)
+			m.awakeTimer = time.AfterFunc(awakeTimeout, func() {
+				if programSend != nil {
+					programSend(voiceAwakeTimeoutMsg{})
+				}
+			})
+			go playBeep(beepWakeAck)
+		}
+
+	case VoiceExecuting:
+		if keyword == "computer" {
+			cancelTimer(&m.executingTimer)
+			m.suspendTTS()
+			m.voiceReturnState = VoiceExecuting
+			m.voiceFailCount = 0
+			m.setVoiceState(VoiceAwake)
+			m.awakeTimer = time.AfterFunc(awakeTimeout, func() {
+				if programSend != nil {
+					programSend(voiceAwakeTimeoutMsg{})
+				}
+			})
+			go playBeep(beepWakeAck)
+		}
+
+	case VoiceConversing:
+		switch keyword {
+		case "computer":
+			m.suspendTTS()
+			m.voiceReturnState = VoiceConversing
+			m.voiceFailCount = 0
+			m.setVoiceState(VoiceAwake)
+			m.awakeTimer = time.AfterFunc(awakeTimeout, func() {
+				if programSend != nil {
+					programSend(voiceAwakeTimeoutMsg{})
+				}
+			})
+			go playBeep(beepWakeAck)
+		}
+	}
+
+	m.rebuildConvContent()
+	return cmds
+}
+
+// executeAwakeCommand dispatches a command label from the AWAKE state.
+// Called by both handleKWSEvent (KWS path) and voiceTranscriptMsg (STT path)
+// so the activeKeywords filter is not applied here.
+func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
+	var cmds []tea.Cmd
+
+	startExecutingTimer := func() {
+		if m.executingTimer != nil {
+			m.executingTimer.Stop()
+		}
+		m.executingTimer = time.AfterFunc(5*time.Second, func() {
+			if programSend != nil {
+				programSend(voiceExecutingTimeoutMsg{})
+			}
+		})
+	}
+
+	switch label {
+	case "stop", "stop_playback":
+		m.voiceSession = false
+		m.killTTS()
+		if m.pendingAction != nil {
+			m.pendingAction = nil
+			m.pendingPost = nil
+			m.confirmBuf = ""
+			m.focusedExIdx = -1
+			m.deletingExIdx = -1
+			canceled := cmdResult{input: m.lastCmd.input, output: []string{"operation canceled"}}
+			m.lastCmd = &canceled
+			m.cmdScroll.SetContent(renderCmdOutput(m))
+			m.cmdScroll.GotoTop()
+			m.setFocus(paneInput)
+			m.input.Focus()
+			m.syncLayout()
+		}
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "resume", "resume_playback":
+		m.resumeTTS()
+		m.setVoiceState(VoiceExecuting)
+		startExecutingTimer()
+		go playAck()
+
+	case "session_start", "talk_start":
+		m.voiceSession = true
+		m.setVoiceState(VoiceConversing)
+		go playBeep(beepWakeAck)
+
+	case "session_resume":
+		if m.voiceSession {
+			m.setVoiceState(VoiceConversing)
+		} else {
+			m.setVoiceState(m.voiceReturnState)
+		}
+		go playAck()
+
+	case "clear_input":
+		m.input.SetValue("")
+		m.input.CursorEnd()
+		m.syncLayout()
+		m.setVoiceState(m.voiceReturnState)
+		go playBeep(beepDictStart)
+
+	case "session_end", "talk_end":
+		m.voiceSession = false
+		m.killTTS()
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "ask_llm":
+		m.pendingDictCmd = "llm"
+		m.input.SetValue("")
+		m.setVoiceState(VoiceDictating)
+		go playBeep(beepDictStart)
+
+	case "chat_note":
+		m.pendingDictCmd = "note"
+		m.input.SetValue("")
+		m.setVoiceState(VoiceDictating)
+		go playBeep(beepDictStart)
+
+	case "chat_replay", "chat_play_last":
+		if len(m.exchanges) > 0 {
+			last := len(m.exchanges) - 1
+			m.ttsGen++
+			cmds = append(cmds, startTTS(ttsText(&m.exchanges[last]), last, m))
+		}
+		m.setVoiceState(VoiceExecuting)
+		startExecutingTimer()
+		go playAck()
+
+	case "chat_play_all":
+		for i := range m.exchanges {
+			m.ttsQueue = append(m.ttsQueue, i)
+		}
+		if len(m.ttsQueue) > 0 {
+			next := m.ttsQueue[0]
+			m.ttsQueue = m.ttsQueue[1:]
+			m.ttsGen++
+			cmds = append(cmds, startTTS(ttsText(&m.exchanges[next]), next, m))
+		}
+		m.setVoiceState(VoiceExecuting)
+		startExecutingTimer()
+		go playAck()
+
+	case "config":
+		res := m.runSlashCmd("/config")
+		m.applySlashResult(res)
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "voice_status":
+		returnState := m.voiceReturnState
+		m.setVoiceState(m.voiceReturnState)
+		go sayVoiceStatus(returnState)
+
+	case "status":
+		res := m.runSlashCmd("/status")
+		m.applySlashResult(res)
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "stats":
+		res := m.runSlashCmd("/stats")
+		m.applySlashResult(res)
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "help":
+		res := m.runSlashCmd("/help")
+		m.applySlashResult(res)
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "delete_last":
+		if len(m.exchanges) > 0 {
+			m.deletingExIdx = len(m.exchanges) - 1
+			res := m.runSlashCmd("/delete-last")
+			m.applySlashResult(res)
+			// Wrap pendingPost to also clear the red highlight when confirmed.
+			if m.pendingPost != nil {
+				origPost := m.pendingPost
+				m.pendingPost = func(model *Model) {
+					origPost(model)
+					model.deletingExIdx = -1
+				}
+			}
+			m.setVoiceState(VoiceIdle)
+			go playAck()
+		}
+
+	case "topic_summary":
+		res := m.runSlashCmd("/topic-summary")
+		m.applySlashResult(res)
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "topic_history":
+		res := m.runSlashCmd("/topic-history")
+		m.applySlashResult(res)
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "topic_list":
+		res := m.runSlashCmd("/topic-list")
+		m.applySlashResult(res)
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "topic_clear":
+		res := m.runSlashCmd("/topic-clear")
+		m.applySlashResult(res)
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "topic_delete":
+		res := m.runSlashCmd("/topic-delete")
+		m.applySlashResult(res)
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "topic_new", "topic_switch":
+		m.pendingDictCmd = label
+		m.input.SetValue("")
+		m.setVoiceState(VoiceDictating)
+		go playBeep(beepDictStart)
+
+	case "profile_list":
+		res := m.runSlashCmd("/profile-list")
+		m.applySlashResult(res)
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "profile_switch":
+		m.pendingDictCmd = label
+		m.input.SetValue("")
+		m.setVoiceState(VoiceDictating)
+		go playBeep(beepDictStart)
+
+	case "resource_list":
+		res := m.runSlashCmd("/resource-list")
+		m.applySlashResult(res)
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "resource_remove":
+		m.pendingDictCmd = label
+		m.input.SetValue("")
+		m.setVoiceState(VoiceDictating)
+		go playBeep(beepDictStart)
+
+	default:
+		// Unrecognised label — return to previous state.
+		dbg("fsm: unrecognised command %q, returning to %s", label, m.voiceReturnState)
+		m.setVoiceState(m.voiceReturnState)
+		go playBeep(beepUnrecognized)
+	}
+
+	m.rebuildConvContent()
+	return cmds
+}
+
+// saveVoiceNote saves the current input as a note entry (same as // prefix).
+func (m *Model) saveVoiceNote() tea.Cmd {
+	text := strings.TrimSpace(m.input.Value())
+	m.input.SetValue("")
+	m.pendingDictCmd = ""
+	if text == "" {
+		m.setVoiceState(VoiceIdle)
+		go playBeep(beepUnrecognized)
+		return nil
+	}
+	if err := m.eng.AddNote(text); err == nil {
+		m.exchanges = append(m.exchanges, exchange{
+			userMsg:  core.Message{Role: core.RoleNote, Content: text, Time: time.Now()},
+			isNote:   true,
+			complete: true,
+			expanded: true,
+		})
+	}
+	m.setVoiceState(VoiceIdle)
+	m.rebuildConvContent()
+	go playAck()
+	return nil
+}
+
+// runSlashCmd executes a slash command string and returns the result.
+// Caller must apply the result to the model via applySlashResult.
+func (m *Model) runSlashCmd(cmd string) cmdResult {
+	return handleCommand(m, cmd)
+}
+
+// applySlashResult updates the model with slash command output.
+func (m *Model) applySlashResult(res cmdResult) {
+	m.lastCmd = &res
+	m.cmdPaneOpen = true
+	m.setFocus(paneCmd)
+	m.input.Blur()
+	m.syncLayout()
+	m.cmdScroll.SetContent(renderCmdOutput(m))
+	m.cmdScroll.GotoTop()
+}
+
+// Beep tone identifiers.
+const (
+	beepWakeAck      = "wake"
+	beepCmdAck       = "cmd"
+	beepDictStart    = "dict_start"
+	beepDictEnd      = "dict_end"
+	beepUnrecognized = "unrecognized"
+)
+
+// sayAck speaks "OK" via macOS say(1) as a command acknowledgement.
+func sayAck() {
+	dbg("beep: say OK")
+	args := []string{"OK"}
+	if activeC2Cfg.TTSVoice != "" {
+		args = append([]string{"-v", activeC2Cfg.TTSVoice}, args...)
+	}
+	cmd := exec.Command("say", args...)
+	_ = cmd.Run()
+}
+
+// sayPrompt speaks an encouragement phrase after a failed command recognition.
+// n is the 1-based miss count; alternates between two phrases.
+func sayPrompt(n int) {
+	var phrase string
+	if n%2 == 1 {
+		phrase = "Try again?"
+	} else {
+		phrase = "Say again?"
+	}
+	dbg("beep: say prompt n=%d %q", n, phrase)
+	args := []string{phrase}
+	if activeC2Cfg.TTSVoice != "" {
+		args = append([]string{"-v", activeC2Cfg.TTSVoice}, args...)
+	}
+	cmd := exec.Command("say", args...)
+	_ = cmd.Run()
+}
+
+// sayVoiceStatus speaks the current FSM context via macOS say(1).
+func sayVoiceStatus(returnState VoiceState) {
+	var phrase string
+	switch returnState {
+	case VoiceIdle:
+		phrase = "Idle, ready for commands"
+	case VoiceDictating:
+		phrase = "Dictating"
+	case VoiceConversing:
+		phrase = "In conversation"
+	case VoiceExecuting:
+		phrase = "Executing"
+	default:
+		phrase = "Ready"
+	}
+	dbg("beep: say voice status %q", phrase)
+	args := []string{phrase}
+	if activeC2Cfg.TTSVoice != "" {
+		args = append([]string{"-v", activeC2Cfg.TTSVoice}, args...)
+	}
+	cmd := exec.Command("say", args...)
+	_ = cmd.Run()
+}
+
+// beepSoftChime plays a soft 880Hz tone with a linear fade-out envelope.
+func beepSoftChime() {
+	dbg("beep: soft chime")
+	const sampleRate = 16000
+	const freq = 880.0
+	const durationMs = 200
+	n := sampleRate * durationMs / 1000
+	samples := make([]float32, n)
+	const amplitude = 0.35
+	const pi2 = 2 * 3.14159265358979
+	for i := range samples {
+		fade := 1.0 - float64(i)/float64(n) // linear fade out
+		samples[i] = float32(amplitude * fade * sin(pi2*freq*float64(i)/float64(sampleRate)))
+	}
+	stopCh := make(chan struct{})
+	_ = audio.Play(samples, sampleRate, stopCh)
+}
+
+// beepEarcon plays a two-note C5→E5 motif (~60ms each).
+func beepEarcon() {
+	dbg("beep: earcon")
+	const sampleRate = 16000
+	const durationMs = 70
+	const amplitude = 0.30
+	const pi2 = 2 * 3.14159265358979
+	freqs := []float64{523.25, 659.25} // C5, E5
+	n := sampleRate * durationMs / 1000
+	samples := make([]float32, n*len(freqs))
+	for ni, freq := range freqs {
+		offset := ni * n
+		for i := 0; i < n; i++ {
+			// Short fade in (10%) and fade out (20%) to avoid clicks.
+			var env float64
+			switch {
+			case i < n/10:
+				env = float64(i) / float64(n/10)
+			case i > n*4/5:
+				env = float64(n-i) / float64(n/5)
+			default:
+				env = 1.0
+			}
+			samples[offset+i] = float32(amplitude * env * sin(pi2*freq*float64(i)/float64(sampleRate)))
+		}
+	}
+	stopCh := make(chan struct{})
+	_ = audio.Play(samples, sampleRate, stopCh)
+}
+
+// playAck is the command-acknowledgement sound. Switch the call to compare options.
+func playAck() {
+	dbg("beep: ack (earcon)")
+	beepEarcon() // options: sayAck(), beepSoftChime(), beepEarcon()
+}
+
+// playBeep plays a short audio tone for the given event. Runs in a goroutine.
+// First pass: simple sine-wave tones generated inline via the audio package.
+func playBeep(kind string) {
+	dbg("beep: %s", kind)
+	const sampleRate = 16000
+	type tone struct{ freq float64; durationMs int }
+	var t tone
+	switch kind {
+	case beepWakeAck:
+		t = tone{880, 120}
+	case beepCmdAck:
+		t = tone{660, 80}
+	case beepDictStart:
+		t = tone{523, 150} // rising: C5
+	case beepDictEnd:
+		t = tone{392, 150} // falling: G4
+	default: // beepUnrecognized
+		t = tone{300, 180}
+	}
+	samples := makeSineTone(t.freq, t.durationMs, sampleRate)
+	stopCh := make(chan struct{})
+	_ = audio.Play(samples, sampleRate, stopCh)
+}
+
+// makeSineTone generates a sine-wave PCM buffer at the given frequency.
+func makeSineTone(freqHz float64, durationMs int, sampleRate int) []float32 {
+	n := sampleRate * durationMs / 1000
+	samples := make([]float32, n)
+	const amplitude = 0.3
+	const pi2 = 2 * 3.14159265358979
+	for i := range samples {
+		samples[i] = float32(amplitude * sin(pi2*freqHz*float64(i)/float64(sampleRate)))
+	}
+	return samples
+}
+
+// sin is a simple Taylor-series sine approximation to avoid importing math.
+// For short tones the accuracy is sufficient.
+func sin(x float64) float64 {
+	// Reduce to [-π, π]
+	const pi = 3.14159265358979
+	for x > pi {
+		x -= 2 * pi
+	}
+	for x < -pi {
+		x += 2 * pi
+	}
+	// 5-term Taylor series
+	x2 := x * x
+	return x * (1 - x2/6*(1-x2/20*(1-x2/42)))
 }
 
 func calcExchangeCost(r engine.ChatResult, eng *engine.Engine) float64 {

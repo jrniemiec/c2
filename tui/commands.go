@@ -911,6 +911,40 @@ func allCompletions() []completionEntry {
 	}
 }
 
+// contextualParams returns candidate parameter values for the given command,
+// or nil if no contextual completion is available for that command.
+func contextualParams(m *Model, cmd string) []string {
+	switch cmd {
+	case "/profile-switch", "/profile-default-set":
+		names := make([]string, 0, len(m.cfg.Profiles))
+		for name := range m.cfg.Profiles {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return names
+
+	case "/topic-switch", "/topic-delete", "/topic-default-set":
+		topics, err := m.eng.ListTopics()
+		if err != nil {
+			return nil
+		}
+		return topics
+
+	case "/resource-remove":
+		st := store.New(m.cfg.TopicsRoot)
+		files, err := st.ListResources(m.eng.TopicName())
+		if err != nil {
+			return nil
+		}
+		names := make([]string, len(files))
+		for i, fi := range files {
+			names[i] = fi.Name()
+		}
+		return names
+	}
+	return nil
+}
+
 // filterCompletions returns entries whose command starts with the given prefix.
 func filterCompletions(prefix string) []completionEntry {
 	var out []completionEntry

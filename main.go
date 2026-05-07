@@ -23,6 +23,7 @@ var version = "dev"
 var (
 	// mode
 	flagNoTUI       bool
+	flagTextMode    bool
 	flagTheme       string
 	flagChatLabels  bool
 	flagFoldLines   int
@@ -85,6 +86,7 @@ func init() {
 	// mode
 	flag.BoolVar(&flagNoTUI, "no-tui", false, "run in headless mode (no TUI)")
 	flag.BoolVar(&flagNoTUI, "nw", false, "headless mode (short for --no-tui)")
+	flag.BoolVar(&flagTextMode, "text-mode", false, "disable voice pipeline, text input only")
 	flag.StringVar(&flagTheme, "theme", "auto", "color theme: light|dark|auto")
 	flag.BoolVar(&flagChatLabels, "chat-labels", true, "prefix each turn with [you]: / [profile]:")
 	flag.IntVar(&flagFoldLines, "fold-lines", 20, "lines threshold before folding entries (0 = never fold)")
@@ -269,7 +271,7 @@ func run() int {
 			return 1
 		}
 	}
-	if err := tui.Start(e, cfg, loreData, c2cfg, flagTheme, chatLabels, foldLines, foldOnStart); err != nil {
+	if err := tui.Start(e, cfg, loreData, c2cfg, flagTheme, chatLabels, foldLines, foldOnStart, flagTextMode); err != nil {
 		fmt.Fprintf(os.Stderr, "tui: %v\n", err)
 		return 1
 	}

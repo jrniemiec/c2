@@ -12,6 +12,7 @@ build:
 
 install: test build
 	cp bin/$(BINARY) $(INSTALL)
+	codesign --force --sign - $(INSTALL)
 	@echo "Installed: $(INSTALL)"
 
 run: build

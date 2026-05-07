@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -240,15 +241,30 @@ func renderTopBar(m *Model) string {
 	if m.voiceErr != "" && m.mode == modeVoice {
 		modeIndicator = fg(lipgloss.Color("#FF4444"), "● ERR: "+m.voiceErr)
 	} else if m.mode == modeVoice {
-		// Alternate between bright and dim red on spinner tick to pulse.
+		// Alternate between bright red and soft orange every 800ms.
 		var dotColor lipgloss.Color
-		if m.spinnerFrame%2 == 0 {
-			dotColor = lipgloss.Color("#FF0000")
+		if m.spinnerFrame%10 < 5 {
+			dotColor = lipgloss.Color("#FF3300")
 		} else {
-			dotColor = lipgloss.Color("#880000")
+			dotColor = lipgloss.Color("#883300")
 		}
 		dot := lipgloss.NewStyle().Foreground(dotColor).Render("●")
-		modeIndicator = dot + fg(t.TopBarText, " VOICE MODE")
+		var stateLabel string
+		switch m.voiceState {
+		case VoiceIdle:
+			stateLabel = " VOICE MODE: IDLE"
+		case VoiceAwake:
+			stateLabel = " VOICE MODE: AWAKE"
+		case VoiceDictating:
+			stateLabel = " VOICE MODE: DICTATING"
+		case VoiceConversing:
+			stateLabel = " VOICE MODE: CONVERSING"
+		case VoiceExecuting:
+			stateLabel = " VOICE MODE: EXECUTING"
+		default:
+			stateLabel = " VOICE MODE"
+		}
+		modeIndicator = dot + fg(t.TopBarText, stateLabel)
 	} else {
 		modeIndicator = fg(t.TopBarText, "○ TEXT MODE")
 	}
@@ -264,11 +280,6 @@ func renderTopBar(m *Model) string {
 	gap := m.width - visibleWidth(leftCenter) - visibleWidth(right) - pad
 	if gap < 1 {
 		gap = 1
-	}
-	// Record the column where the mode indicator starts (for mouse click detection).
-	m.modeIndicatorCol = visibleWidth(leftCenter) + gap
-	if navPart != "" {
-		m.modeIndicatorCol += visibleWidth(navPart) + 2
 	}
 	bar := leftCenter + strings.Repeat(" ", gap) + right + strings.Repeat(" ", pad)
 	return bar + "\n" + fg(t.BoxBorder, strings.Repeat("─", m.width))
@@ -298,7 +309,7 @@ func renderConversation(m *Model) (string, []int) {
 
 	for i, ex := range m.exchanges {
 		focused := m.focus == paneConv && m.focusedExIdx == i
-		deleting := m.pendingAction != nil && m.focusedExIdx == i
+		deleting := (m.pendingAction != nil && m.focusedExIdx == i) || m.deletingExIdx == i
 
 		// Layout: col 1 = bullet (●), col 2 = space, col 3+ = text.
 		// Both user and assistant text start at column 3 (2-char prefix).
@@ -549,7 +560,16 @@ func renderInputPane(m *Model) string {
 			// Build prefix.
 			var prefix string
 			if firstVisualLine {
-				prefix = strings.Repeat(" ", padW) + fg(t.InputPrompt, prompt)
+				promptColor := t.InputPrompt
+				if m.voiceState == VoiceConversing ||
+					(m.voiceState == VoiceDictating && m.pendingDictCmd == "note") {
+					// Pulse between Dimmed and TopBarText on a 2s cosine cycle.
+					const period = 40 // frames at 100ms each = 4s
+					phase := float64(m.spinnerFrame%period) / float64(period)
+					pulse := (1 - math.Cos(phase*2*math.Pi)) / 2
+					promptColor = lerpColor(t.Dimmed, t.TopBarText, pulse)
+				}
+				prefix = strings.Repeat(" ", padW) + fg(promptColor, prompt)
 				firstVisualLine = false
 			} else {
 				prefix = strings.Repeat(" ", padW)
@@ -657,8 +677,8 @@ func renderCompletionPane(m *Model) string {
 		}
 	}
 	for i, e := range m.completionItems {
-		var line string
 		cmdPart := fmt.Sprintf(" %-*s  ", maxCmd, e.cmd)
+		var line string
 		if i == m.completionIdx {
 			line = fg(t.TopBarText, cmdPart+e.desc)
 		} else {
@@ -670,9 +690,28 @@ func renderCompletionPane(m *Model) string {
 	return sb.String()
 }
 
+func renderParamPane(m *Model) string {
+	t := ActiveTheme
+	var sb strings.Builder
+	for i, item := range m.paramItems {
+		var line string
+		if i == m.paramIdx {
+			line = fg(t.TopBarText, " "+item)
+		} else {
+			line = fg(t.InputText, " "+item)
+		}
+		sb.WriteByte('\n')
+		sb.WriteString(line)
+	}
+	return sb.String()
+}
+
 func renderBottomPane(m *Model) string {
 	t := ActiveTheme
 	sep := fg(t.BoxBorder, strings.Repeat("─", m.width))
+	if len(m.paramItems) > 0 {
+		return sep + renderParamPane(m)
+	}
 	if len(m.completionItems) > 0 {
 		return sep + renderCompletionPane(m)
 	}

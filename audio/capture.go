@@ -18,12 +18,9 @@ type Capturer struct {
 	buf    []float32
 }
 
-// New initialises PortAudio and opens the default input device.
-// Call Close() when done.
+// New opens the default input device.
+// PortAudio must already be initialised via audio.Init().
 func New() (*Capturer, error) {
-	if err := portaudio.Initialize(); err != nil {
-		return nil, fmt.Errorf("portaudio init: %w", err)
-	}
 	c := &Capturer{
 		buf: make([]float32, FramesPerBuffer),
 	}
@@ -71,5 +68,5 @@ func (c *Capturer) Stop() error {
 			return err
 		}
 	}
-	return portaudio.Terminate()
+	return nil
 }

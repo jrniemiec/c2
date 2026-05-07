@@ -2,20 +2,23 @@ package audio
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/gordonklaus/portaudio"
 )
 
 const playbackChunk = 1024 // samples per write; controls interrupt granularity
 
+// playMu ensures only one output stream is open at a time.
+// Concurrent calls to Play (e.g. beep + TTS) would cause Core Audio -50 errors.
+var playMu sync.Mutex
+
 // Play writes mono float32 PCM samples to the default output device at the
 // given sample rate. It returns early (without error) if stop is closed.
+// PortAudio must already be initialised via audio.Init().
 func Play(samples []float32, sampleRate int, stop <-chan struct{}) error {
-	if err := portaudio.Initialize(); err != nil {
-		return fmt.Errorf("playback: portaudio init: %w", err)
-	}
-	defer portaudio.Terminate()
-
+	playMu.Lock()
+	defer playMu.Unlock()
 	buf := make([]float32, playbackChunk)
 	stream, err := portaudio.OpenDefaultStream(
 		0,          // no input

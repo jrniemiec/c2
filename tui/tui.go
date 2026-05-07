@@ -194,6 +194,7 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 	defer cap.Stop()
 
 	currentState := VoiceIdle
+	computerPending := false // true after "computer" is sent, until TUI acknowledges via stateChangeCh
 
 	// Audio accumulator used in AWAKE, DICTATING, and CONVERSING states.
 	// VAD is bypassed — we accumulate raw audio and flush on "over" KWS or a
@@ -217,6 +218,7 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 
 		case newState := <-stateChangeCh:
 			dbg("pipeline: state %s → %s", currentState, newState)
+			computerPending = false
 			currentState = newState
 			// Reset audio accumulator on every state change.
 			speechBuf = speechBuf[:0]
@@ -298,7 +300,16 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 				}
 				if label := kwsStream.Process(kwsChunk); label != "" {
 					dbg("pipeline: KWS keyword=%q state=%s", label, currentState)
-					send(voiceKWSEventMsg{keyword: label})
+					if label == "computer" {
+						if computerPending {
+							dbg("pipeline: computer ignored (pending acknowledgement)")
+						} else {
+							computerPending = true
+							send(voiceKWSEventMsg{keyword: label})
+						}
+					} else {
+						send(voiceKWSEventMsg{keyword: label})
+					}
 				}
 			}
 

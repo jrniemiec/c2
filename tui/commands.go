@@ -1060,11 +1060,12 @@ func cmdVoiceCommands() cmdResult {
 		labels  []string
 	}{
 		{"session", []string{"clear", "session_start", "session_end", "session_resume", "stop", "resume"}},
-		{"conversation", []string{"ask_llm", "chat_note", "chat_replay", "chat_play_last", "chat_play_all", "clear_input", "delete_last"}},
-		{"topic", []string{"topic_list", "topic_switch", "topic_new", "topic_clear", "topic_delete", "topic_summary", "topic_history"}},
-		{"profile", []string{"profile_list", "profile_switch"}},
+		{"conversation", []string{"ask_llm", "chat_note", "chat_replay", "chat_play_last", "chat_play_all", "play_all", "clear_input", "delete_last", "fold", "unfold", "tts_toggle"}},
+		{"topic", []string{"topic_info", "topic_list", "topic_switch", "topic_new", "topic_clear", "topic_delete", "topic_default", "topic_default_set", "topic_summary", "topic_history"}},
+		{"profile", []string{"profile_info", "profile_list", "profile_switch", "profile_default", "profile_default_set"}},
 		{"resource", []string{"resource_list", "resource_view", "resource_edit", "resource_remove"}},
-		{"info", []string{"status", "voice_status", "stats", "config", "help"}},
+		{"system", []string{"system_show", "system_clear"}},
+		{"info", []string{"status", "voice_status", "stats", "config", "voice_commands", "help"}},
 	}
 
 	var lines []string

@@ -470,40 +470,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.completionItems = nil
 				m.completionIdx = -1
 				m.syncLayout()
-			} else if m.pendingAction != nil {
-				m.pendingAction = nil
-				m.pendingPost = nil
-				m.confirmBuf = ""
-				m.focusedExIdx = -1
-				m.deletingExIdx = -1
-				canceled := cmdResult{input: m.lastCmd.input, output: []string{"operation canceled"}}
-				m.lastCmd = &canceled
-				m.cmdScroll.SetContent(renderCmdOutput(&m))
-				m.cmdScroll.GotoTop()
-				m.setFocus(paneInput)
-				m.input.Focus()
-				m.rebuildConvContent()
-				m.syncLayout()
-			} else if m.cmdPaneOpen {
+			} else {
+				// Single Esc: cancel any pending action, close cmd pane,
+				// clear input, and return focus to input — all in one gesture.
+				if m.pendingAction != nil {
+					m.pendingAction = nil
+					m.pendingPost = nil
+					m.confirmBuf = ""
+					m.focusedExIdx = -1
+					m.deletingExIdx = -1
+					canceled := cmdResult{input: m.lastCmd.input, output: []string{"operation canceled"}}
+					m.lastCmd = &canceled
+					m.cmdScroll.SetContent(renderCmdOutput(&m))
+					m.cmdScroll.GotoTop()
+				}
 				m.cmdPaneOpen = false
 				m.lastCmd = nil
-				m.setFocus(paneInput)
-				m.input.Focus()
-				m.syncLayout()
-			} else if m.focus == paneInput && m.input.Value() != "" {
 				m.input.Reset()
 				m.input.SetHeight(1)
 				m.pastedBlob = ""
-				m.completionItems = nil
-				m.completionIdx = -1
 				m.historyIdx = -1
 				m.historySaved = ""
-				m.syncLayout()
-			} else {
-				m.setFocus(paneInput)
 				m.focusedExIdx = -1
+				m.setFocus(paneInput)
 				m.input.Focus()
 				m.rebuildConvContent()
+				m.syncLayout()
 			}
 
 		// [DEV] Ctrl+Y: toggle transcribing state for UI testing
@@ -717,6 +709,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.completionIdx > 0 {
 					m.completionIdx--
 				}
+			} else if m.focus == paneInput && m.input.Line() > 0 {
+				// Multi-line input: cursor is not on the first line — move up within textarea.
+				var inputCmd tea.Cmd
+				m.input, inputCmd = m.input.Update(msg)
+				cmds = append(cmds, inputCmd)
 			} else if m.focus == paneInput && m.historyIdx != -1 {
 				// Already browsing — continue going back.
 				if m.historyIdx > 0 {
@@ -759,6 +756,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.completionIdx < len(m.completionItems)-1 {
 					m.completionIdx++
 				}
+			} else if m.focus == paneInput && m.input.Line() < strings.Count(m.input.Value(), "\n") {
+				// Multi-line input: cursor is not on the last line — move down within textarea.
+				var inputCmd tea.Cmd
+				m.input, inputCmd = m.input.Update(msg)
+				cmds = append(cmds, inputCmd)
 			} else if m.focus == paneInput && m.historyIdx != -1 {
 				if m.historyIdx < len(m.inputHistory)-1 {
 					m.historyIdx++
@@ -1273,12 +1275,11 @@ func (m *Model) handleKWSEvent(keyword string) []tea.Cmd {
 		}
 
 	case VoiceAwake:
-		cancelTimer(&m.awakeTimer)
 		if keyword == "computer" {
-			// Re-wake: reset the timer.
-			startAwakeTimer()
-			go playBeep(beepWakeAck)
+			// Already awake — ignore duplicate wake word.
+			dbg("fsm: computer ignored (already AWAKE)")
 		} else {
+			cancelTimer(&m.awakeTimer)
 			cmds = append(cmds, m.executeAwakeCommand(keyword)...)
 		}
 
@@ -1600,8 +1601,7 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		go playAck()
 
 	case "config":
-		res := m.runSlashCmd("/config")
-		m.applySlashResult(res)
+		m.submitVoiceSlashCmd("/config")
 		m.setVoiceState(VoiceIdle)
 		go playAck()
 
@@ -1611,34 +1611,79 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		go sayVoiceStatus(returnState)
 
 	case "status":
-		res := m.runSlashCmd("/status")
-		m.applySlashResult(res)
+		m.submitVoiceSlashCmd("/status")
 		m.setVoiceState(VoiceIdle)
 		go playAck()
 
 	case "stats":
-		res := m.runSlashCmd("/stats")
-		m.applySlashResult(res)
+		m.submitVoiceSlashCmd("/stats")
 		m.setVoiceState(VoiceIdle)
 		go playAck()
 
 	case "voice_commands":
-		res := m.runSlashCmd("/voice-commands")
-		m.applySlashResult(res)
+		m.submitVoiceSlashCmd("/voice-commands")
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "fold":
+		m.submitVoiceSlashCmd("/fold")
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "unfold":
+		m.submitVoiceSlashCmd("/unfold")
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "play_all":
+		m.submitVoiceSlashCmd("/play-all")
+		m.setVoiceState(VoiceExecuting)
+		startExecutingTimer()
+
+	case "tts_toggle":
+		m.submitVoiceSlashCmd("/tts")
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "topic_info":
+		m.submitVoiceSlashCmd("/topic")
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "topic_default":
+		m.submitVoiceSlashCmd("/topic-default")
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "profile_info":
+		m.submitVoiceSlashCmd("/profile")
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "profile_default":
+		m.submitVoiceSlashCmd("/profile-default")
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "system_show":
+		m.submitVoiceSlashCmd("/system")
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "system_clear":
+		m.submitVoiceSlashCmd("/system-clear")
 		m.setVoiceState(VoiceIdle)
 		go playAck()
 
 	case "help":
-		res := m.runSlashCmd("/help")
-		m.applySlashResult(res)
+		m.submitVoiceSlashCmd("/help")
 		m.setVoiceState(VoiceIdle)
 		go playAck()
 
 	case "delete_last":
 		if len(m.exchanges) > 0 {
 			m.deletingExIdx = len(m.exchanges) - 1
-			res := m.runSlashCmd("/delete-last")
-			m.applySlashResult(res)
+			m.submitVoiceSlashCmd("/delete-last")
 			// Wrap pendingPost to also clear the red highlight when confirmed.
 			if m.pendingPost != nil {
 				origPost := m.pendingPost
@@ -1652,106 +1697,76 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		}
 
 	case "topic_summary":
-		res := m.runSlashCmd("/topic-summary")
-		m.applySlashResult(res)
+		m.submitVoiceSlashCmd("/topic-summary")
 		m.setVoiceState(VoiceIdle)
 		go playAck()
 
 	case "topic_history":
-		res := m.runSlashCmd("/topic-history")
-		m.applySlashResult(res)
+		m.submitVoiceSlashCmd("/topic-history")
 		m.setVoiceState(VoiceIdle)
 		go playAck()
 
 	case "topic_list":
-		res := m.runSlashCmd("/topic-list")
-		m.applySlashResult(res)
+		m.submitVoiceSlashCmd("/topic-list")
 		m.setVoiceState(VoiceIdle)
-		if res.spokenText != "" {
-			cmds = append(cmds, startTTS(res.spokenText, -1, m))
+		if m.lastCmd != nil && m.lastCmd.spokenText != "" {
+			cmds = append(cmds, startTTS(m.lastCmd.spokenText, -1, m))
 		} else {
 			go playAck()
 		}
 
 	case "topic_clear":
-		res := m.runSlashCmd("/topic-clear")
-		m.applySlashResult(res)
+		m.submitVoiceSlashCmd("/topic-clear")
 		m.setVoiceState(VoiceIdle)
 		go playAck()
 
 	case "topic_delete":
-		res := m.runSlashCmd("/topic-delete")
-		m.applySlashResult(res)
-		m.setVoiceState(VoiceIdle)
-		go playAck()
+		m.prefillVoiceCmd("/topic-delete")
 
-	case "topic_new", "topic_switch":
+	case "topic_switch":
+		m.prefillVoiceCmd("/topic-switch")
+
+	case "topic_default_set":
+		m.prefillVoiceCmd("/topic-default-set")
+
+	case "topic_new":
 		m.pendingDictCmd = label
 		m.input.SetValue("")
 		m.setVoiceState(VoiceDictating)
 		go playBeep(beepDictStart)
 
 	case "profile_list":
-		res := m.runSlashCmd("/profile-list")
-		m.applySlashResult(res)
+		m.submitVoiceSlashCmd("/profile-list")
 		m.setVoiceState(VoiceIdle)
-		if res.spokenText != "" {
-			cmds = append(cmds, startTTS(res.spokenText, -1, m))
+		if m.lastCmd != nil && m.lastCmd.spokenText != "" {
+			cmds = append(cmds, startTTS(m.lastCmd.spokenText, -1, m))
 		} else {
 			go playAck()
 		}
 
 	case "profile_switch":
-		m.pendingDictCmd = label
-		m.input.SetValue("")
-		m.setVoiceState(VoiceDictating)
-		go playBeep(beepDictStart)
+		m.prefillVoiceCmd("/profile-switch")
+
+	case "profile_default_set":
+		m.prefillVoiceCmd("/profile-default-set")
 
 	case "resource_list":
-		res := m.runSlashCmd("/resource-list")
-		m.applySlashResult(res)
+		m.submitVoiceSlashCmd("/resource-list")
 		m.setVoiceState(VoiceIdle)
-		if res.spokenText != "" {
-			cmds = append(cmds, startTTS(res.spokenText, -1, m))
+		if m.lastCmd != nil && m.lastCmd.spokenText != "" {
+			cmds = append(cmds, startTTS(m.lastCmd.spokenText, -1, m))
 		} else {
 			go playAck()
 		}
 
 	case "resource_remove":
-		m.pendingDictCmd = label
-		m.input.SetValue("")
-		m.setVoiceState(VoiceDictating)
-		go playBeep(beepDictStart)
+		m.prefillVoiceCmd("/resource-remove")
 
 	case "resource_view":
-		m.input.SetValue("/resource-view ")
-		m.input.CursorEnd()
-		params := contextualParams(m, "/resource-view")
-		m.paramItems = params
-		if len(params) > 0 {
-			m.paramIdx = 0
-		} else {
-			m.paramIdx = -1
-		}
-		m.setFocus(paneInput)
-		m.input.Focus()
-		m.setVoiceState(m.voiceReturnState)
-		go playBeep(beepDictStart)
+		m.prefillVoiceCmd("/resource-view")
 
 	case "resource_edit":
-		m.input.SetValue("/resource-edit ")
-		m.input.CursorEnd()
-		params := contextualParams(m, "/resource-edit")
-		m.paramItems = params
-		if len(params) > 0 {
-			m.paramIdx = 0
-		} else {
-			m.paramIdx = -1
-		}
-		m.setFocus(paneInput)
-		m.input.Focus()
-		m.setVoiceState(m.voiceReturnState)
-		go playBeep(beepDictStart)
+		m.prefillVoiceCmd("/resource-edit")
 
 	default:
 		// Unrecognised label — return to previous state.
@@ -1803,6 +1818,34 @@ func (m *Model) applySlashResult(res cmdResult) {
 	m.syncLayout()
 	m.cmdScroll.SetContent(renderCmdOutput(m))
 	m.cmdScroll.GotoTop()
+}
+
+// submitVoiceSlashCmd places cmd visibly in the input box, pushes it to
+// history, then executes it — giving the same visual trace as typing + Enter.
+func (m *Model) submitVoiceSlashCmd(cmd string) {
+	m.input.SetValue(cmd)
+	m.input.CursorEnd()
+	m.pushHistory(cmd)
+	res := handleCommand(m, cmd)
+	m.applySlashResult(res)
+}
+
+// prefillVoiceCmd pre-fills the input with "/cmd " and opens the param picker,
+// returning focus to the input pane — voice as a keyboard accelerator.
+func (m *Model) prefillVoiceCmd(cmd string) {
+	m.input.SetValue(cmd + " ")
+	m.input.CursorEnd()
+	params := contextualParams(m, cmd)
+	m.paramItems = params
+	if len(params) > 0 {
+		m.paramIdx = 0
+	} else {
+		m.paramIdx = -1
+	}
+	m.setFocus(paneInput)
+	m.input.Focus()
+	m.setVoiceState(m.voiceReturnState)
+	go playBeep(beepDictStart)
 }
 
 // Beep tone identifiers.

@@ -3,10 +3,15 @@ package tui
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jrniemiec/lore/config"
 	"github.com/jrniemiec/lore/core"
@@ -20,8 +25,8 @@ var knownCommands = map[string]bool{
 	"topic-delete": true, "topic-clear": true, "topic-default": true,
 	"topic-default-set": true, "topic-summary": true, "topic-history": true,
 	"topic-resource": true,
-	"resource-list": true, "resource-add": true, "resource-remove": true,
-	"tts": true,
+	"resource-list": true, "resource-add": true, "resource-remove": true, "resource-delete": true, "resource-view": true, "resource-edit": true,
+	"tts": true, "voice-commands": true,
 	"profile": true, "profile-switch": true, "profile-list": true,
 	"profile-default": true, "profile-default-set": true,
 	"system": true, "system-set": true, "system-clear": true,
@@ -75,8 +80,12 @@ func handleCommand(m *Model, input string) cmdResult {
 		return cmdResourceAdd(m, args)
 	case "/resource-list":
 		return cmdResourceList(m, args)
-	case "/resource-remove":
+	case "/resource-remove", "/resource-delete":
 		return cmdResourceRemove(m, args)
+	case "/resource-view":
+		return cmdResourceOpen(m, args)
+	case "/resource-edit":
+		return cmdResourceEdit(m, args)
 
 	// --- profile ---
 	case "/profile":
@@ -127,6 +136,8 @@ func handleCommand(m *Model, input string) cmdResult {
 	// --- help ---
 	case "/delete-last":
 		return cmdDeleteLast(m, args)
+	case "/voice-commands":
+		return cmdVoiceCommands()
 	case "/help":
 		return cmdHelp("/help", args)
 
@@ -419,6 +430,69 @@ func cmdResourceRemove(m *Model, args []string) cmdResult {
 		fmt.Sprintf("Resource %q will be permanently deleted from topic %q.", name, topicName),
 		"[yes] to confirm, other input or Esc to cancel:",
 	})
+}
+
+func cmdResourceOpen(m *Model, args []string) cmdResult {
+	if len(args) == 0 {
+		return errResult("/resource-view", "usage: /resource-view <name>")
+	}
+	name := args[0]
+	filePath := filepath.Join(m.eng.ResourceDir(), name)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return errResult("/resource-view "+name, fmt.Sprintf("resource %q not found", name))
+	}
+	// Binary detection: non-UTF8 bytes in first 512 bytes.
+	check := data
+	if len(check) > 512 {
+		check = check[:512]
+	}
+	if !utf8.Valid(check) {
+		return errResult("/resource-view "+name, fmt.Sprintf("%q is not a text file", name))
+	}
+	// Truncate large files.
+	const maxBytes = 200 * 1024
+	truncated := false
+	if len(data) > maxBytes {
+		data = data[:maxBytes]
+		truncated = true
+	}
+	text := string(data)
+	if truncated {
+		text += "\n[file truncated at 200 KB]"
+	}
+	// Open overlay.
+	m.preFocus = m.focus
+	m.preFocusedExIdx = m.focusedExIdx
+	m.resourceLines = strings.Split(text, "\n")
+	m.resourceName = name
+	m.resourceCursor = 0
+	m.setFocus(paneResource)
+	return cmdResult{input: "/resource-view " + name, suppressCmdPane: true}
+}
+
+func cmdResourceEdit(m *Model, args []string) cmdResult {
+	if len(args) == 0 {
+		return errResult("/resource-edit", "usage: /resource-edit <name>")
+	}
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		return errResult("/resource-edit", "$EDITOR is not set or not exported — add 'export EDITOR=<path>' to your shell config")
+	}
+	name := args[0]
+	filePath := filepath.Join(m.eng.ResourceDir(), name)
+	if _, err := os.Stat(filePath); err != nil {
+		return errResult("/resource-edit "+name, fmt.Sprintf("resource %q not found", name))
+	}
+	editorCmd := exec.Command(editor, filePath)
+	res := cmdResult{
+		input:           "/resource-edit " + name,
+		suppressCmdPane: true,
+		execCmd: tea.ExecProcess(editorCmd, func(err error) tea.Msg {
+			return resourceReloadMsg{name: name}
+		}),
+	}
+	return res
 }
 
 // =============================================================================
@@ -900,6 +974,9 @@ func allCompletions() []completionEntry {
 		{"/resource-add", "add resource file to current topic"},
 		{"/resource-list", "list resources for topic"},
 		{"/resource-remove", "remove a resource from topic"},
+		{"/resource-delete", "delete a resource from topic (alias for remove)"},
+		{"/resource-view", "open a resource file in the viewer"},
+		{"/resource-edit", "edit a resource file in $EDITOR"},
 		{"/profile", "show profile info"},
 		{"/profile-switch", "switch to named profile"},
 		{"/profile-list", "list all profiles"},
@@ -911,6 +988,7 @@ func allCompletions() []completionEntry {
 		{"/config", "show resolved configuration"},
 		{"/status", "show effective defaults"},
 		{"/stats", "show usage and cost stats"},
+		{"/voice-commands", "list all voice commands and their spoken phrases"},
 		{"/help", "show all commands or commands for a group"},
 		{"/delete-last", "delete last N exchanges from history"},
 		{"/tts [on|off]", "toggle TTS auto-mode"},
@@ -942,7 +1020,7 @@ func contextualParams(m *Model, cmd string) []string {
 		}
 		return topics
 
-	case "/resource-remove":
+	case "/resource-remove", "/resource-delete", "/resource-view", "/resource-edit":
 		st := store.New(m.cfg.TopicsRoot)
 		files, err := st.ListResources(m.eng.TopicName())
 		if err != nil {
@@ -972,6 +1050,42 @@ func filterCompletions(prefix string) []completionEntry {
 // help
 // =============================================================================
 
+func cmdVoiceCommands() cmdResult {
+	type entry struct {
+		label    string
+		synonyms string
+	}
+	groups := []struct {
+		name    string
+		labels  []string
+	}{
+		{"session", []string{"clear", "session_start", "session_end", "session_resume", "stop", "resume"}},
+		{"conversation", []string{"ask_llm", "chat_note", "chat_replay", "chat_play_last", "chat_play_all", "clear_input", "delete_last"}},
+		{"topic", []string{"topic_list", "topic_switch", "topic_new", "topic_clear", "topic_delete", "topic_summary", "topic_history"}},
+		{"profile", []string{"profile_list", "profile_switch"}},
+		{"resource", []string{"resource_list", "resource_view", "resource_edit", "resource_remove"}},
+		{"info", []string{"status", "voice_status", "stats", "config", "help"}},
+	}
+
+	var lines []string
+	for _, g := range groups {
+		lines = append(lines, g.name+":")
+		for _, label := range g.labels {
+			phrases := commandSynonyms[label]
+			if len(phrases) == 0 {
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("  %-20s  %s", label, strings.Join(phrases, ", ")))
+		}
+		lines = append(lines, "")
+	}
+	// trim trailing blank
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return okResult("/voice-commands", lines)
+}
+
 func cmdHelp(cmd string, args []string) cmdResult {
 	type entry struct {
 		cmd  string
@@ -994,6 +1108,9 @@ func cmdHelp(cmd string, args []string) cmdResult {
 			{"/resource-list [topic]", "list resources for topic"},
 			{"/resource-add <file>", "copy file into topic resources"},
 			{"/resource-remove <name>", "delete a resource from topic"},
+			{"/resource-delete <name>", "delete a resource from topic (alias for remove)"},
+			{"/resource-view <name>", "open a resource file in the viewer"},
+			{"/resource-edit <name>", "edit a resource file in $EDITOR"},
 		},
 		"profile": {
 			{"/profile", "show current profile"},
@@ -1011,6 +1128,7 @@ func cmdHelp(cmd string, args []string) cmdResult {
 			{"/config", "show resolved configuration"},
 			{"/status", "show effective defaults"},
 			{"/stats", "show usage and cost stats"},
+			{"/voice-commands", "list all voice commands and their spoken phrases"},
 			{"/help [group]", "show all commands or commands for a group"},
 			{"/delete-last [n]", "delete last N exchanges from history (default 1)"},
 			{"/exit", "exit lore"},

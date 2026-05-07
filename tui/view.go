@@ -59,6 +59,13 @@ func (m Model) View() string {
 	if m.width == 0 {
 		return ""
 	}
+	if m.focus == paneResource {
+		return strings.Join([]string{
+			renderResourceTopBar(&m),
+			m.resourceScroll.View(),
+			renderResourceHintBar(&m),
+		}, "\n")
+	}
 	return strings.Join([]string{
 		renderTopBar(&m),
 		m.conv.View(),
@@ -723,6 +730,61 @@ func renderBottomPane(m *Model) string {
 
 func renderStatusBar(m *Model) string {
 	return renderBottomPane(m)
+}
+
+// =============================================================================
+// Resource overlay
+// =============================================================================
+
+// renderResourceLines builds the scrollable content for the resource overlay.
+// The cursor line is highlighted with a ▶ marker.
+func renderResourceLines(m *Model) string {
+	t := ActiveTheme
+	var sb strings.Builder
+	for i, line := range m.resourceLines {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		if i == m.resourceCursor {
+			sb.WriteString(fgBold(t.InputPrompt, "▶ ") + fg(t.TopBarText, line))
+		} else {
+			sb.WriteString(fg(t.Dimmed, "  ") + fg(t.AssistantText, line))
+		}
+	}
+	return sb.String()
+}
+
+func renderResourceTopBar(m *Model) string {
+	t := ActiveTheme
+	const pad = 1
+	left := fgBold(t.TopBarText, "c2")
+	barSep := fg(t.Dimmed, " │ ")
+	center := fg(t.TopBarText, "resource: "+m.resourceName)
+	total := len(m.resourceLines)
+	right := fg(t.Dimmed, fmt.Sprintf("line %d / %d", m.resourceCursor+1, total))
+	leftCenter := strings.Repeat(" ", pad) + left + barSep + center
+	gap := m.width - visibleWidth(leftCenter) - visibleWidth(right) - pad
+	if gap < 1 {
+		gap = 1
+	}
+	bar := leftCenter + strings.Repeat(" ", gap) + right + strings.Repeat(" ", pad)
+	return bar + "\n" + fg(t.BoxBorder, strings.Repeat("─", m.width))
+}
+
+func renderResourceHintBar(m *Model) string {
+	t := ActiveTheme
+	sep := fg(t.BoxBorder, strings.Repeat("─", m.width))
+	var hint string
+	if m.isTTSPlaying() {
+		var speedHint string
+		if m.c2cfg.TTSBackend != "kokoro" {
+			speedHint = fmt.Sprintf("  ·  %d wpm  [ slower  ] faster", m.ttsRate)
+		}
+		hint = renderWaveIndicator(m.spinnerFrame, "speaking"+speedHint+"  ·  s stop  ·  Esc close", t.StreamingText, t.Dimmed)
+	} else {
+		hint = fg(t.Dimmed, "↑↓ / PgUp PgDn  move  ·  s speak from here  ·  e edit  ·  g/G top/bottom  ·  Esc / q  close")
+	}
+	return sep + "\n" + strings.Repeat(" ", 1) + hint
 }
 
 func renderStatsLine(m *Model, sep string) string {

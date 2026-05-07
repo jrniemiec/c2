@@ -27,6 +27,7 @@ const (
 	paneInput focusPane = iota
 	paneConv
 	paneCmd
+	paneResource
 )
 
 // interactionMode is the active input mode.
@@ -71,6 +72,7 @@ type voiceTranscriptMsg struct {
 type voicePipelineErrMsg struct{ err error } // pipeline failed to start or crashed
 type voiceAutoSubmitMsg struct{}              // fires 500ms after transcript to auto-send
 type clipboardFlashMsg struct{}              // fires 1.5s after copy to clear the flash
+type resourceReloadMsg struct{ name string } // fires after external editor exits
 
 // Model is the root Bubbletea application model.
 type Model struct {
@@ -186,6 +188,15 @@ type Model struct {
 	// contextual parameter picker (active when input is "/cmd " with no arg yet)
 	paramItems []string // candidate values (e.g. topic names, profile names)
 	paramIdx   int      // highlighted row (-1 = none)
+
+	// resource overlay (active when focus == paneResource)
+	resourceLines    []string       // file content split into lines
+	resourceName     string         // file name shown in top bar
+	resourceCursor   int            // highlighted line index
+	resourceScroll   viewport.Model // scrollable viewport for the overlay
+	resourceTTSText  string         // text currently being spoken (for speed-change restart)
+	preFocus         focusPane      // focus state to restore on overlay close
+	preFocusedExIdx  int            // focusedExIdx to restore on overlay close
 }
 
 // ttsPendingItem is a sentence queued for sentence-streaming TTS playback.
@@ -196,12 +207,14 @@ type ttsPendingItem struct {
 
 // cmdResult holds one slash command invocation and its output.
 type cmdResult struct {
-	input       string
-	output      []string
-	warnLine    string // if non-empty, rendered in red before output lines
-	isError     bool
-	quit        bool   // if true, the app should exit
-	spokenText  string // if non-empty, spoken via TTS when executed as a voice command
+	input           string
+	output          []string
+	warnLine        string   // if non-empty, rendered in red before output lines
+	isError         bool
+	quit            bool     // if true, the app should exit
+	spokenText      string   // if non-empty, spoken via TTS when executed as a voice command
+	suppressCmdPane bool     // if true, skip opening the cmd pane (e.g. resource overlay)
+	execCmd         tea.Cmd  // if non-nil, run as a tea.Cmd after processing (e.g. ExecProcess)
 }
 
 // New creates a ready-to-run Model, loading existing history.
@@ -237,20 +250,21 @@ func New(eng *engine.Engine, cfg config.Config, loreData string) Model {
 	vp.Style = lipgloss.NewStyle()
 
 	m := Model{
-		eng:           eng,
-		cfg:           cfg,
-		loreData:      loreData,
-		conv:          vp,
-		input:         ta,
-		focus:         paneInput,
-		focusedExIdx:  -1,
-		deletingExIdx: -1,
-		historyIdx:    -1,
-		ttsExIdx:      -1,
-		ttsRate:       200,
-		cursorVisible: true,
-		windowFocused: true,
-		themeMode:     "auto",
+		eng:             eng,
+		cfg:             cfg,
+		loreData:        loreData,
+		conv:            vp,
+		input:           ta,
+		focus:           paneInput,
+		focusedExIdx:    -1,
+		deletingExIdx:   -1,
+		historyIdx:      -1,
+		ttsExIdx:        -1,
+		ttsRate:         200,
+		cursorVisible:   true,
+		windowFocused:   true,
+		themeMode:       "auto",
+		preFocusedExIdx: -1,
 	}
 	m.cmdScroll = viewport.New(0, 0)
 	m.cmdScroll.Style = lipgloss.NewStyle() // no background
@@ -451,6 +465,14 @@ func (m *Model) syncLayout() {
 	m.conv.Height = convH
 	m.cmdScroll.Width = m.width
 	m.cmdScroll.Height = m.cmdPaneHeight()
+
+	// Resource overlay: full height minus top bar (2) and hint bar (2).
+	resourceH := m.height - 4
+	if resourceH < 1 {
+		resourceH = 1
+	}
+	m.resourceScroll.Width = m.width
+	m.resourceScroll.Height = resourceH
 }
 
 // rebuildConvContent re-renders all exchanges into the viewport.
@@ -560,4 +582,37 @@ func (m *Model) resumeTTS() {
 func (m *Model) scrollToBottom() {
 	m.userScrolled = false
 	m.conv.GotoBottom()
+}
+
+// rebuildResourceContent re-renders the resource overlay lines into the viewport.
+func (m *Model) rebuildResourceContent() {
+	if len(m.resourceLines) == 0 {
+		return
+	}
+	m.resourceScroll.SetContent(renderResourceLines(m))
+}
+
+// scrollResourceToCursor scrolls the resource viewport so the cursor line is visible.
+func (m *Model) scrollResourceToCursor() {
+	vp := &m.resourceScroll
+	if m.resourceCursor < vp.YOffset {
+		vp.SetYOffset(m.resourceCursor)
+	} else if m.resourceCursor >= vp.YOffset+vp.Height {
+		vp.SetYOffset(m.resourceCursor - vp.Height + 1)
+	}
+}
+
+// closeResourceOverlay tears down the resource overlay and restores previous focus.
+func (m *Model) closeResourceOverlay() {
+	m.setFocus(m.preFocus)
+	m.focusedExIdx = m.preFocusedExIdx
+	m.resourceLines = nil
+	m.resourceName = ""
+	m.resourceCursor = 0
+	m.resourceTTSText = ""
+	if m.preFocus == paneInput {
+		m.input.Focus()
+	}
+	m.rebuildConvContent()
+	m.syncLayout()
 }

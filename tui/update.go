@@ -3,7 +3,9 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -39,6 +41,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncInputPrompt()
 		m.syncLayout()
 		m.rebuildConvContent()
+		m.rebuildResourceContent()
 
 	// --- window focus/blur ---
 	case tea.FocusMsg:
@@ -167,6 +170,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cmdPaneOpen = false
 			m.lastCmd = nil
 			m.syncLayout()
+		}
+
+	case resourceReloadMsg:
+		// Re-read the file. If the resource viewer is open for this file, refresh it.
+		filePath := filepath.Join(m.eng.ResourceDir(), msg.name)
+		data, err := os.ReadFile(filePath)
+		if err == nil && m.focus == paneResource && m.resourceName == msg.name {
+			text := string(data)
+			m.resourceLines = strings.Split(text, "\n")
+			if m.resourceCursor >= len(m.resourceLines) {
+				m.resourceCursor = len(m.resourceLines) - 1
+			}
+			m.rebuildResourceContent()
+			m.scrollResourceToCursor()
 		}
 
 	case voiceSpeechStartedMsg:
@@ -339,6 +356,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// --- keyboard ---
 	case tea.KeyMsg:
+		// Resource overlay: handle all keys independently and return early.
+		if m.focus == paneResource {
+			cmds = append(cmds, m.handleResourceKey(msg)...)
+			return m, tea.Batch(cmds...)
+		}
+
 		// Bracketed paste: entire pasted content arrives as one KeyMsg with Paste=true.
 		if msg.Paste && m.focus == paneInput && !m.streaming && m.pendingAction == nil {
 			// Normalize \r\n and bare \r to \n (terminals paste with \r endings).
@@ -540,19 +563,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.killTTS()
 						return m, tea.Quit
 					}
-					m.lastCmd = &result
-					m.cmdPaneOpen = true
-					if result.isError {
-						m.setFocus(paneInput)
-						m.input.Focus()
+					if result.execCmd != nil {
+						cmds = append(cmds, result.execCmd)
+					} else if result.suppressCmdPane {
+						m.syncLayout()
+						m.rebuildResourceContent()
 					} else {
-						m.setFocus(paneCmd)
-						m.input.Blur()
+						m.lastCmd = &result
+						m.cmdPaneOpen = true
+						if result.isError {
+							m.setFocus(paneInput)
+							m.input.Focus()
+						} else {
+							m.setFocus(paneCmd)
+							m.input.Blur()
+						}
+						m.rebuildConvContent()
+						m.cmdScroll.SetContent(renderCmdOutput(&m))
+						m.cmdScroll.GotoTop()
+						m.syncLayout()
 					}
-					m.rebuildConvContent()
-					m.cmdScroll.SetContent(renderCmdOutput(&m))
-					m.cmdScroll.GotoTop()
-					m.syncLayout()
 				}
 			} else if m.focus == paneCmd && m.pendingAction == nil {
 				m.cmdPaneOpen = false
@@ -637,25 +667,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.killTTS()
 							return m, tea.Quit
 						}
-						m.lastCmd = &result
-						m.cmdPaneOpen = true
 						m.input.Reset()
-						if result.isError {
-							m.setFocus(paneInput)
-							m.input.Focus()
+						if result.execCmd != nil {
+							cmds = append(cmds, result.execCmd)
+						} else if result.suppressCmdPane {
+							m.syncLayout()
+							m.rebuildResourceContent()
 						} else {
-							m.setFocus(paneCmd)
-							m.input.Blur()
-						}
-						m.syncLayout()
-						m.cmdScroll.SetContent(renderCmdOutput(&m))
-						m.cmdScroll.GotoTop()
-						// If /play-all queued entries, kick off playback now.
-						if !m.isTTSPlaying() && len(m.ttsQueue) > 0 {
-							next := m.ttsQueue[0]
-							m.ttsQueue = m.ttsQueue[1:]
-							if next < len(m.exchanges) {
-								cmds = append(cmds, startTTS(ttsText(&m.exchanges[next]), next, &m))
+							m.lastCmd = &result
+							m.cmdPaneOpen = true
+							if result.isError {
+								m.setFocus(paneInput)
+								m.input.Focus()
+							} else {
+								m.setFocus(paneCmd)
+								m.input.Blur()
+							}
+							m.syncLayout()
+							m.cmdScroll.SetContent(renderCmdOutput(&m))
+							m.cmdScroll.GotoTop()
+							// If /play-all queued entries, kick off playback now.
+							if !m.isTTSPlaying() && len(m.ttsQueue) > 0 {
+								next := m.ttsQueue[0]
+								m.ttsQueue = m.ttsQueue[1:]
+								if next < len(m.exchanges) {
+									cmds = append(cmds, startTTS(ttsText(&m.exchanges[next]), next, &m))
+								}
 							}
 						}
 					} else {
@@ -1297,6 +1334,138 @@ func (m *Model) handleKWSEvent(keyword string) []tea.Cmd {
 	return cmds
 }
 
+// handleResourceKey handles all keyboard input when the resource overlay is active.
+func (m *Model) handleResourceKey(msg tea.KeyMsg) []tea.Cmd {
+	var cmds []tea.Cmd
+
+	switch {
+	case key.Matches(msg, keys.Cancel): // Ctrl+C
+		if m.isTTSPlaying() {
+			m.killTTS()
+			m.rebuildResourceContent()
+		} else {
+			m.closeResourceOverlay()
+		}
+
+	case key.Matches(msg, keys.Dismiss): // Esc
+		m.killTTS()
+		m.closeResourceOverlay()
+
+	case msg.Type == tea.KeyRunes && string(msg.Runes) == "q":
+		m.killTTS()
+		m.closeResourceOverlay()
+
+	case msg.Type == tea.KeyRunes && string(msg.Runes) == "s":
+		if m.isTTSPlaying() {
+			m.killTTS()
+			m.resourceTTSText = ""
+			m.rebuildResourceContent()
+		} else {
+			text := ttsStrip(strings.Join(m.resourceLines[m.resourceCursor:], "\n"))
+			if text != "" {
+				m.resourceTTSText = text
+				cmds = append(cmds, startTTS(text, -1, m))
+			}
+		}
+
+	case msg.Type == tea.KeyRunes && string(msg.Runes) == "[":
+		if m.isTTSPlaying() && m.resourceTTSText != "" {
+			if m.ttsRate > 80 {
+				m.ttsRate -= 20
+			}
+			text := m.resourceTTSText
+			m.killTTS()
+			cmds = append(cmds, startTTS(text, -1, m))
+		}
+
+	case msg.Type == tea.KeyRunes && string(msg.Runes) == "]":
+		if m.isTTSPlaying() && m.resourceTTSText != "" {
+			if m.ttsRate < 500 {
+				m.ttsRate += 20
+			}
+			text := m.resourceTTSText
+			m.killTTS()
+			cmds = append(cmds, startTTS(text, -1, m))
+		}
+
+	case msg.Type == tea.KeyRunes && string(msg.Runes) == "e":
+		editor := os.Getenv("EDITOR")
+		if editor == "" {
+			m.lastCmd = &cmdResult{
+				input:   "resource-edit",
+				output:  []string{"$EDITOR is not set or not exported — add 'export EDITOR=<path>' to your shell config"},
+				isError: true,
+			}
+			m.cmdPaneOpen = true
+			m.cmdScroll.SetContent(renderCmdOutput(m))
+			m.cmdScroll.GotoTop()
+			m.syncLayout()
+			break
+		}
+		m.killTTS()
+		filePath := filepath.Join(m.eng.ResourceDir(), m.resourceName)
+		name := m.resourceName
+		editorCmd := exec.Command(editor, filePath)
+		cmds = append(cmds, tea.ExecProcess(editorCmd, func(err error) tea.Msg {
+			return resourceReloadMsg{name: name}
+		}))
+
+	case msg.Type == tea.KeyRunes && string(msg.Runes) == "g":
+		m.resourceCursor = 0
+		m.rebuildResourceContent()
+		m.resourceScroll.GotoTop()
+
+	case msg.Type == tea.KeyRunes && string(msg.Runes) == "G":
+		if len(m.resourceLines) > 0 {
+			m.resourceCursor = len(m.resourceLines) - 1
+		}
+		m.rebuildResourceContent()
+		m.resourceScroll.GotoBottom()
+
+	case key.Matches(msg, keys.NavUp):
+		if m.resourceCursor > 0 {
+			m.resourceCursor--
+			m.rebuildResourceContent()
+			m.scrollResourceToCursor()
+		}
+
+	case key.Matches(msg, keys.NavDown):
+		if m.resourceCursor < len(m.resourceLines)-1 {
+			m.resourceCursor++
+			m.rebuildResourceContent()
+			m.scrollResourceToCursor()
+		}
+
+	case key.Matches(msg, keys.ScrollUp): // PgUp
+		step := m.resourceScroll.Height / 2
+		if step < 1 {
+			step = 1
+		}
+		m.resourceCursor -= step
+		if m.resourceCursor < 0 {
+			m.resourceCursor = 0
+		}
+		m.rebuildResourceContent()
+		m.resourceScroll.HalfPageUp()
+		m.scrollResourceToCursor()
+
+	case key.Matches(msg, keys.ScrollDown): // PgDn
+		step := m.resourceScroll.Height / 2
+		if step < 1 {
+			step = 1
+		}
+		m.resourceCursor += step
+		if m.resourceCursor >= len(m.resourceLines) {
+			m.resourceCursor = len(m.resourceLines) - 1
+		}
+		m.rebuildResourceContent()
+		m.resourceScroll.HalfPageDown()
+		m.scrollResourceToCursor()
+	}
+
+	return cmds
+}
+
 // executeAwakeCommand dispatches a command label from the AWAKE state.
 // Called by both handleKWSEvent (KWS path) and voiceTranscriptMsg (STT path)
 // so the activeKeywords filter is not applied here.
@@ -1315,6 +1484,33 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 	}
 
 	switch label {
+	case "clear":
+		m.killTTS()
+		m.voiceSession = false
+		m.pendingAction = nil
+		m.pendingPost = nil
+		m.confirmBuf = ""
+		m.pendingDictCmd = ""
+		m.pendingVoiceSubmit = false
+		m.transcribing = false
+		m.input.Reset()
+		m.input.SetHeight(1)
+		m.pastedBlob = ""
+		m.completionItems = nil
+		m.completionIdx = -1
+		m.paramItems = nil
+		m.paramIdx = -1
+		m.cmdPaneOpen = false
+		m.lastCmd = nil
+		m.focusedExIdx = -1
+		m.deletingExIdx = -1
+		m.setFocus(paneInput)
+		m.input.Focus()
+		m.setVoiceState(VoiceIdle)
+		m.syncLayout()
+		m.rebuildConvContent()
+		go playBeep(beepCmdAck)
+
 	case "stop", "stop_playback":
 		m.voiceSession = false
 		m.killTTS()
@@ -1426,6 +1622,12 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		m.setVoiceState(VoiceIdle)
 		go playAck()
 
+	case "voice_commands":
+		res := m.runSlashCmd("/voice-commands")
+		m.applySlashResult(res)
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
 	case "help":
 		res := m.runSlashCmd("/help")
 		m.applySlashResult(res)
@@ -1519,6 +1721,36 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		m.pendingDictCmd = label
 		m.input.SetValue("")
 		m.setVoiceState(VoiceDictating)
+		go playBeep(beepDictStart)
+
+	case "resource_view":
+		m.input.SetValue("/resource-view ")
+		m.input.CursorEnd()
+		params := contextualParams(m, "/resource-view")
+		m.paramItems = params
+		if len(params) > 0 {
+			m.paramIdx = 0
+		} else {
+			m.paramIdx = -1
+		}
+		m.setFocus(paneInput)
+		m.input.Focus()
+		m.setVoiceState(m.voiceReturnState)
+		go playBeep(beepDictStart)
+
+	case "resource_edit":
+		m.input.SetValue("/resource-edit ")
+		m.input.CursorEnd()
+		params := contextualParams(m, "/resource-edit")
+		m.paramItems = params
+		if len(params) > 0 {
+			m.paramIdx = 0
+		} else {
+			m.paramIdx = -1
+		}
+		m.setFocus(paneInput)
+		m.input.Focus()
+		m.setVoiceState(m.voiceReturnState)
 		go playBeep(beepDictStart)
 
 	default:

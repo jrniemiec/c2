@@ -80,6 +80,7 @@ type voiceExecutingTimeoutMsg struct{}
 // commandSynonyms maps each command label to the spoken phrases that trigger it.
 // Matching is done after lowercasing and stripping common filler words.
 var commandSynonyms = map[string][]string{
+	"clear":           {"clear"},
 	"stop":            {"stop", "cancel", "stop playback", "stop it"},
 	"resume":          {"resume", "keep going", "resume playback"},
 	"session_start":   {"start session", "session start", "start conversation", "conversation start", "start chat", "chat start"},
@@ -95,6 +96,7 @@ var commandSynonyms = map[string][]string{
 	"status":          {"status", "show status"},
 	"voice_status":    {"your status", "what's your status", "what is your status"},
 	"stats":           {"stats", "statistics", "show stats"},
+	"voice_commands":  {"voice commands", "list voice commands", "show voice commands", "what can I say"},
 	"help":            {"help", "show help", "commands"},
 	"delete_last":     {"delete last", "remove last", "undo"},
 	"topic_list":      {"list topics", "show topics", "topics", "topic list"},
@@ -107,7 +109,9 @@ var commandSynonyms = map[string][]string{
 	"profile_list":    {"list profiles", "show profiles", "profiles", "profile list"},
 	"profile_switch":  {"switch profile", "change profile", "change model", "profile switch"},
 	"resource_list":   {"list resources", "resources", "show resources", "resource list"},
-	"resource_remove": {"remove resource", "delete resource", "resource remove"},
+	"resource_remove": {"remove resource", "delete resource", "resource remove", "resource delete"},
+	"resource_view":   {"view resource", "open resource", "show resource", "resource view"},
+	"resource_edit":   {"edit resource", "resource edit"},
 }
 
 // fillerWords are stripped from the transcript before matching.

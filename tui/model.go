@@ -196,11 +196,12 @@ type ttsPendingItem struct {
 
 // cmdResult holds one slash command invocation and its output.
 type cmdResult struct {
-	input    string
-	output   []string
-	warnLine string // if non-empty, rendered in red before output lines
-	isError  bool
-	quit     bool // if true, the app should exit
+	input       string
+	output      []string
+	warnLine    string // if non-empty, rendered in red before output lines
+	isError     bool
+	quit        bool   // if true, the app should exit
+	spokenText  string // if non-empty, spoken via TTS when executed as a voice command
 }
 
 // New creates a ready-to-run Model, loading existing history.

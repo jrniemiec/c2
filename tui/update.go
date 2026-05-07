@@ -1465,7 +1465,11 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		res := m.runSlashCmd("/topic-list")
 		m.applySlashResult(res)
 		m.setVoiceState(VoiceIdle)
-		go playAck()
+		if res.spokenText != "" {
+			cmds = append(cmds, startTTS(res.spokenText, -1, m))
+		} else {
+			go playAck()
+		}
 
 	case "topic_clear":
 		res := m.runSlashCmd("/topic-clear")
@@ -1489,7 +1493,11 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		res := m.runSlashCmd("/profile-list")
 		m.applySlashResult(res)
 		m.setVoiceState(VoiceIdle)
-		go playAck()
+		if res.spokenText != "" {
+			cmds = append(cmds, startTTS(res.spokenText, -1, m))
+		} else {
+			go playAck()
+		}
 
 	case "profile_switch":
 		m.pendingDictCmd = label
@@ -1501,7 +1509,11 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		res := m.runSlashCmd("/resource-list")
 		m.applySlashResult(res)
 		m.setVoiceState(VoiceIdle)
-		go playAck()
+		if res.spokenText != "" {
+			cmds = append(cmds, startTTS(res.spokenText, -1, m))
+		} else {
+			go playAck()
+		}
 
 	case "resource_remove":
 		m.pendingDictCmd = label

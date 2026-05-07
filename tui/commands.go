@@ -212,7 +212,9 @@ func cmdTopicList(m *Model) cmdResult {
 		return errResult("/topic-list", err.Error())
 	}
 	if len(topics) == 0 {
-		return okResult("/topic-list", []string{"(no topics)"})
+		r := okResult("/topic-list", []string{"(no topics)"})
+		r.spokenText = "No topics."
+		return r
 	}
 	cur := m.eng.TopicName()
 	lines := make([]string, len(topics))
@@ -223,7 +225,9 @@ func cmdTopicList(m *Model) cmdResult {
 			lines[i] = t
 		}
 	}
-	return okResult("/topic-list", lines)
+	r := okResult("/topic-list", lines)
+	r.spokenText = "Topics: " + strings.Join(topics, ", ") + ". Current: " + cur + "."
+	return r
 }
 
 func cmdTopicDelete(m *Model, args []string) cmdResult {
@@ -373,10 +377,14 @@ func cmdResourceList(m *Model, args []string) cmdResult {
 		return errResult("/resource-list", err.Error())
 	}
 	if len(files) == 0 {
-		return okResult("/resource-list", []string{fmt.Sprintf("(no resources for topic %q)", topicName)})
+		r := okResult("/resource-list", []string{fmt.Sprintf("(no resources for topic %q)", topicName)})
+		r.spokenText = "No resources for topic " + topicName + "."
+		return r
 	}
 	lines := []string{fmt.Sprintf("resources for topic %q:", topicName)}
-	for _, fi := range files {
+	fileNames := make([]string, len(files))
+	for i, fi := range files {
+		fileNames[i] = fi.Name()
 		size := fi.Size()
 		var sizeStr string
 		switch {
@@ -389,7 +397,9 @@ func cmdResourceList(m *Model, args []string) cmdResult {
 		}
 		lines = append(lines, fmt.Sprintf("  %-32s  %8s  %s", fi.Name(), sizeStr, fi.ModTime().Format(time.DateTime)))
 	}
-	return okResult("/resource-list", lines)
+	r := okResult("/resource-list", lines)
+	r.spokenText = "Resources for topic " + topicName + ": " + strings.Join(fileNames, ", ") + "."
+	return r
 }
 
 func cmdResourceRemove(m *Model, args []string) cmdResult {
@@ -591,7 +601,9 @@ func cmdProfileList(m *Model, args []string) cmdResult {
 		}
 		lines = append(lines, line)
 	}
-	return okResult("/profile-list", lines)
+	res := okResult("/profile-list", lines)
+	res.spokenText = "Profiles: " + strings.Join(names, ", ") + ". Current: " + cur + "."
+	return res
 }
 
 func cmdProfileDefault(m *Model) cmdResult {

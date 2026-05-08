@@ -248,30 +248,23 @@ func renderTopBar(m *Model) string {
 	if m.voiceErr != "" && m.mode == modeVoice {
 		modeIndicator = fg(lipgloss.Color("#FF4444"), "● ERR: "+m.voiceErr)
 	} else if m.mode == modeVoice {
-		// Alternate between bright red and soft orange every 800ms.
-		var dotColor lipgloss.Color
-		if m.spinnerFrame%10 < 5 {
-			dotColor = lipgloss.Color("#FF3300")
-		} else {
-			dotColor = lipgloss.Color("#883300")
-		}
-		dot := lipgloss.NewStyle().Foreground(dotColor).Render("●")
 		var stateLabel string
 		switch m.voiceState {
 		case VoiceIdle:
-			stateLabel = " VOICE MODE: IDLE"
+			stateLabel = " VOICE MODE: IDLE      "
 		case VoiceAwake:
-			stateLabel = " VOICE MODE: AWAKE"
+			stateLabel = " VOICE MODE: AWAKE     "
 		case VoiceDictating:
-			stateLabel = " VOICE MODE: DICTATING"
+			stateLabel = " VOICE MODE: DICTATING "
 		case VoiceConversing:
 			stateLabel = " VOICE MODE: CONVERSING"
 		case VoiceExecuting:
-			stateLabel = " VOICE MODE: EXECUTING"
+			stateLabel = " VOICE MODE: EXECUTING "
 		default:
-			stateLabel = " VOICE MODE"
+			stateLabel = " VOICE MODE            "
 		}
-		modeIndicator = dot + fg(t.TopBarText, stateLabel)
+		levelBar := renderMicLevel(m, t)
+		modeIndicator = levelBar + fg(t.TopBarText, stateLabel)
 	} else {
 		modeIndicator = fg(t.TopBarText, "○ TEXT MODE")
 	}
@@ -290,6 +283,44 @@ func renderTopBar(m *Model) string {
 	}
 	bar := leftCenter + strings.Repeat(" ", gap) + right + strings.Repeat(" ", pad)
 	return bar + "\n" + fg(t.BoxBorder, strings.Repeat("─", m.width))
+}
+
+// renderMicLevel renders a 4-character symmetric mountain bar driven by peak-hold decay.
+// Shape: far(0.3) · near(0.8) · near(0.8) · far(0.3) of the current peak.
+// Colour: t.StreamingText above speech threshold, t.Dimmed below.
+func renderMicLevel(m *Model, t Theme) string {
+	const blocks = "⣀⣄⣤⣦⣶⣷⣾⣿"
+	const speechThreshold = 0.01
+	runes := []rune(blocks)
+
+	levelToBlock := func(v float32) string {
+		if v < 0.001 {
+			return string(runes[0:1])
+		}
+		scaled := math.Log(float64(v)/0.001) / math.Log(0.3/0.001)
+		if scaled > 1 {
+			scaled = 1
+		}
+		idx := int(scaled * float64(len(runes)-1))
+		return string(runes[idx : idx+1])
+	}
+
+	levels := [4]float32{
+		m.voicePeakOuter * 0.3,
+		m.voicePeakInner * 0.8,
+		m.voicePeakInner * 0.8,
+		m.voicePeakOuter * 0.3,
+	}
+	var out strings.Builder
+	for _, v := range levels {
+		ch := levelToBlock(v)
+		if v >= speechThreshold {
+			out.WriteString(fg(t.StreamingText, ch))
+		} else {
+			out.WriteString(fg(t.Dimmed, ch))
+		}
+	}
+	return out.String()
 }
 
 // =============================================================================
@@ -346,8 +377,12 @@ func renderConversation(m *Model) (string, []int) {
 			noteText := ex.userMsg.Content
 			noteLines := strings.Split(noteText, "\n")
 			if fl > 0 && (len(noteLines) > fl || len(noteText) > 512) && !ex.expanded {
-				noteText = strings.Join(noteLines[:fl], "\n")
-				noteText += "\n" + fg(t.Dimmed, fmt.Sprintf("... (%d more lines)", len(noteLines)-fl))
+				cap := fl
+				if cap > len(noteLines) {
+					cap = len(noteLines)
+				}
+				noteText = strings.Join(noteLines[:cap], "\n")
+				noteText += "\n" + fg(t.Dimmed, fmt.Sprintf("... (%d more lines)", len(noteLines)-cap))
 			}
 			noteRaw := wordWrap(compactLines(noteText), wrapWidth)
 			turnContent = addPrefix(fgLines(t.UserText, noteRaw),
@@ -357,8 +392,12 @@ func renderConversation(m *Model) (string, []int) {
 			userText := ex.userMsg.Content
 			userLines := strings.Split(userText, "\n")
 			if fl > 0 && (len(userLines) > fl || len(userText) > 512) && !ex.expanded {
-				userText = strings.Join(userLines[:fl], "\n")
-				userText += "\n" + fg(t.Dimmed, fmt.Sprintf("... (%d more lines)", len(userLines)-fl))
+				cap := fl
+				if cap > len(userLines) {
+					cap = len(userLines)
+				}
+				userText = strings.Join(userLines[:cap], "\n")
+				userText += "\n" + fg(t.Dimmed, fmt.Sprintf("... (%d more lines)", len(userLines)-cap))
 			}
 			userRaw := wordWrap(compactLines(userText), wrapWidth)
 			var userContent string
@@ -780,9 +819,9 @@ func renderResourceHintBar(m *Model) string {
 		if m.c2cfg.TTSBackend != "kokoro" {
 			speedHint = fmt.Sprintf("  ·  %d wpm  [ slower  ] faster", m.ttsRate)
 		}
-		hint = renderWaveIndicator(m.spinnerFrame, "speaking"+speedHint+"  ·  s stop  ·  Esc close", t.StreamingText, t.Dimmed)
+		hint = renderWaveIndicator(m.spinnerFrame, "speaking"+speedHint+"  ·  s stop  ·  Ctrl+X close", t.StreamingText, t.Dimmed)
 	} else {
-		hint = fg(t.Dimmed, "↑↓ / PgUp PgDn  move  ·  s speak from here  ·  e edit  ·  g/G top/bottom  ·  Esc / q  close")
+		hint = fg(t.Dimmed, "↑↓ / PgUp PgDn  move  ·  s speak from here  ·  e edit  ·  g/G top/bottom  ·  Ctrl+X  close")
 	}
 	return sep + "\n" + strings.Repeat(" ", 1) + hint
 }

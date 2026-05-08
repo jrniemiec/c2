@@ -195,6 +195,7 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 
 	currentState := VoiceIdle
 	computerPending := false // true after "computer" is sent, until TUI acknowledges via stateChangeCh
+	levelChunkCount := 0    // throttle: send voiceLevelMsg every 3 chunks (~96ms)
 
 	// Audio accumulator used in AWAKE, DICTATING, and CONVERSING states.
 	// VAD is bypassed — we accumulate raw audio and flush on "over" KWS or a
@@ -311,6 +312,21 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 						send(voiceKWSEventMsg{keyword: label})
 					}
 				}
+			}
+
+			// Mic level — compute RMS and send throttled update to UI.
+			levelChunkCount++
+			if levelChunkCount >= 3 {
+				levelChunkCount = 0
+				var sum float32
+				for _, s := range chunk {
+					sum += s * s
+				}
+				var rms float32
+				if len(chunk) > 0 {
+					rms = float32(math.Sqrt(float64(sum / float32(len(chunk)))))
+				}
+				send(voiceLevelMsg{level: rms})
 			}
 
 			// AWAKE: energy-buffer accumulation for short commands (no VAD).

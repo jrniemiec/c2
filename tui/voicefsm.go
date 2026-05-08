@@ -73,6 +73,9 @@ type voiceAwakeTimeoutMsg struct{}
 // voiceExecutingTimeoutMsg fires when EXECUTING has no follow-up for 5s.
 type voiceExecutingTimeoutMsg struct{}
 
+// voiceLevelMsg carries a new RMS mic level sample from the pipeline goroutine.
+type voiceLevelMsg struct{ level float32 }
+
 // voiceStateChangePipelineMsg is an internal message (pipeline-side only)
 // carrying the new FSM state so the pipeline can gate VAD+STT.
 // Sent via stateChangeCh, not the Bubbletea loop.
@@ -124,6 +127,7 @@ var commandSynonyms = map[string][]string{
 	"resource_remove":   {"remove resource", "delete resource", "resource remove", "resource delete"},
 	"resource_view":   {"view resource", "open resource", "show resource", "resource view"},
 	"resource_edit":   {"edit resource", "resource edit"},
+	"export":          {"export", "save conversation", "export conversation"},
 }
 
 // fillerWords are stripped from the transcript before matching.

@@ -26,7 +26,7 @@ var knownCommands = map[string]bool{
 	"topic-default-set": true, "topic-summary": true, "topic-history": true,
 	"topic-resource": true,
 	"resource-list": true, "resource-add": true, "resource-remove": true, "resource-delete": true, "resource-view": true, "resource-edit": true,
-	"tts": true, "voice-commands": true,
+	"tts": true, "voice-commands": true, "export": true,
 	"profile": true, "profile-switch": true, "profile-list": true,
 	"profile-default": true, "profile-default-set": true,
 	"system": true, "system-set": true, "system-clear": true,
@@ -138,6 +138,8 @@ func handleCommand(m *Model, input string) cmdResult {
 		return cmdDeleteLast(m, args)
 	case "/voice-commands":
 		return cmdVoiceCommands()
+	case "/export":
+		return cmdExport(m, args)
 	case "/help":
 		return cmdHelp("/help", args)
 
@@ -846,10 +848,23 @@ func cmdDeleteLast(m *Model, args []string) cmdResult {
 		}
 		n = v
 	}
-	noun := "last exchange"
-	if n > 1 {
-		noun = fmt.Sprintf("last %d exchanges", n)
+
+	// Single entry: execute immediately, no confirmation needed.
+	if n == 1 {
+		if len(m.exchanges) == 0 {
+			return okResult("/delete-last", []string{"nothing to delete"})
+		}
+		removed, err := m.eng.DeleteLast(1)
+		if err != nil {
+			return errResult("/delete-last", err.Error())
+		}
+		m.exchanges = nil
+		m.loadHistory()
+		return okResult("/delete-last", []string{fmt.Sprintf("deleted %d exchange(s)", removed)})
 	}
+
+	// Multiple entries: keep confirmation flow.
+	noun := fmt.Sprintf("last %d exchanges", n)
 	m.pendingAction = func() cmdResult {
 		removed, err := m.eng.DeleteLast(n)
 		if err != nil {
@@ -989,6 +1004,7 @@ func allCompletions() []completionEntry {
 		{"/status", "show effective defaults"},
 		{"/stats", "show usage and cost stats"},
 		{"/voice-commands", "list all voice commands and their spoken phrases"},
+		{"/export", "export conversation to file"},
 		{"/help", "show all commands or commands for a group"},
 		{"/delete-last", "delete last N exchanges from history"},
 		{"/tts [on|off]", "toggle TTS auto-mode"},
@@ -1031,6 +1047,10 @@ func contextualParams(m *Model, cmd string) []string {
 			names[i] = fi.Name()
 		}
 		return names
+
+	case "/export":
+		defaultName := fmt.Sprintf("export-%s-%s.md", m.eng.TopicName(), time.Now().Format("2006-01-02"))
+		return []string{defaultName}
 	}
 	return nil
 }
@@ -1044,6 +1064,88 @@ func filterCompletions(prefix string) []completionEntry {
 		}
 	}
 	return out
+}
+
+// =============================================================================
+// export
+// =============================================================================
+
+func cmdExport(m *Model, args []string) cmdResult {
+	// Resolve destination path.
+	var destPath string
+	defaultName := fmt.Sprintf("export-%s-%s.md", m.eng.TopicName(), time.Now().Format("2006-01-02"))
+	if len(args) == 0 {
+		destPath = filepath.Join(m.eng.ResourceDir(), defaultName)
+	} else {
+		name := args[0]
+		// If no directory component, save to resources.
+		if !strings.HasPrefix(name, "/") && !strings.HasPrefix(name, "~/") && !strings.HasPrefix(name, "./") && !strings.HasPrefix(name, "../") && !strings.Contains(name, string(os.PathSeparator)) {
+			destPath = filepath.Join(m.eng.ResourceDir(), name)
+		} else {
+			if strings.HasPrefix(name, "~/") {
+				home, _ := os.UserHomeDir()
+				name = filepath.Join(home, name[2:])
+			}
+			destPath = name
+		}
+	}
+
+	// Determine format from extension.
+	markdown := strings.ToLower(filepath.Ext(destPath)) == ".md"
+
+	// Build content.
+	var sb strings.Builder
+	topic := m.eng.TopicName()
+	profileCode := m.eng.ProfileCode()
+	profileModel := m.eng.Profile().Model
+	now := time.Now().Format("2006-01-02 15:04")
+
+	if markdown {
+		fmt.Fprintf(&sb, "# %s\n", topic)
+		fmt.Fprintf(&sb, "Date: %s  \n", now)
+		fmt.Fprintf(&sb, "Profile: %s / %s\n", profileCode, profileModel)
+	} else {
+		fmt.Fprintf(&sb, "Export: %s\n", topic)
+		fmt.Fprintf(&sb, "Date: %s\n", now)
+		fmt.Fprintf(&sb, "Profile: %s / %s\n", profileCode, profileModel)
+	}
+
+	sep := "\n---\n"
+	if !markdown {
+		sep = "\n===\n"
+	}
+
+	for _, ex := range m.exchanges {
+		sb.WriteString(sep)
+		if ex.isNote {
+			if markdown {
+				fmt.Fprintf(&sb, "\n📌 %s\n", ex.userMsg.Content)
+			} else {
+				fmt.Fprintf(&sb, "\n[note] %s\n", ex.userMsg.Content)
+			}
+			continue
+		}
+		if markdown {
+			fmt.Fprintf(&sb, "\n**you:** %s\n", ex.userMsg.Content)
+			if ex.asstMsg.Content != "" {
+				fmt.Fprintf(&sb, "\n**%s:** %s\n", profileModel, ex.asstMsg.Content)
+			}
+		} else {
+			fmt.Fprintf(&sb, "\nyou: %s\n", ex.userMsg.Content)
+			if ex.asstMsg.Content != "" {
+				fmt.Fprintf(&sb, "\n%s: %s\n", profileModel, ex.asstMsg.Content)
+			}
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		return errResult("/export", err.Error())
+	}
+	if err := os.WriteFile(destPath, []byte(sb.String()), 0644); err != nil {
+		return errResult("/export", err.Error())
+	}
+
+	return okResult("/export", []string{fmt.Sprintf("saved to %s", destPath)})
 }
 
 // =============================================================================
@@ -1130,6 +1232,7 @@ func cmdHelp(cmd string, args []string) cmdResult {
 			{"/status", "show effective defaults"},
 			{"/stats", "show usage and cost stats"},
 			{"/voice-commands", "list all voice commands and their spoken phrases"},
+			{"/export [file]", "export conversation; default saves to topic resources as export-topic-date.md"},
 			{"/help [group]", "show all commands or commands for a group"},
 			{"/delete-last [n]", "delete last N exchanges from history (default 1)"},
 			{"/exit", "exit lore"},

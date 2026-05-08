@@ -144,6 +144,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// --- TTS done ---
 	// --- voice pipeline ---
+	case voiceLevelMsg:
+		if msg.level > m.voicePeakInner {
+			m.voicePeakInner = msg.level
+		} else {
+			m.voicePeakInner *= 0.81
+		}
+		if msg.level > m.voicePeakOuter {
+			m.voicePeakOuter = msg.level
+		} else {
+			m.voicePeakOuter *= 0.52
+		}
+
 	case voicePipelineErrMsg:
 		m.voiceErr = msg.err.Error()
 		m.voiceReady = false
@@ -885,38 +897,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, tea.Batch(cmds...)
 				case "x":
-					if m.pendingAction == nil {
-						exIdx := m.focusedExIdx
-						eng := m.eng
-						m.pendingAction = func() cmdResult {
-							if err := eng.DeleteAt(exIdx); err != nil {
-								return cmdResult{input: fmt.Sprintf("delete entry #%d", exIdx+1), output: []string{err.Error()}, isError: true}
-							}
-							return cmdResult{input: fmt.Sprintf("delete entry #%d", exIdx+1), output: []string{"deleted"}}
-						}
-						m.pendingPost = func(model *Model) {
-							model.exchanges = append(model.exchanges[:exIdx], model.exchanges[exIdx+1:]...)
-							if model.focusedExIdx >= len(model.exchanges) {
-								model.focusedExIdx = len(model.exchanges) - 1
-							}
-							if len(model.exchanges) == 0 {
-								model.focus = paneInput
-								model.focusedExIdx = -1
-								model.input.Focus()
-							}
-						}
-						m.lastCmd = &cmdResult{
-							input:    fmt.Sprintf("delete entry #%d", exIdx+1),
-							warnLine: fmt.Sprintf("Deleting entry #%d ...", exIdx+1),
-							output:   []string{"[yes] to confirm, other or Esc to cancel:"},
-						}
+					exIdx := m.focusedExIdx
+					if err := m.eng.DeleteAt(exIdx); err != nil {
+						m.lastCmd = &cmdResult{input: fmt.Sprintf("delete entry #%d", exIdx+1), output: []string{err.Error()}, isError: true}
 						m.cmdPaneOpen = true
-						m.setFocus(paneCmd)
-						m.input.Blur()
+					} else {
+						m.exchanges = append(m.exchanges[:exIdx], m.exchanges[exIdx+1:]...)
+						if m.focusedExIdx >= len(m.exchanges) {
+							m.focusedExIdx = len(m.exchanges) - 1
+						}
+						if len(m.exchanges) == 0 {
+							m.focus = paneInput
+							m.focusedExIdx = -1
+							m.input.Focus()
+						}
 						m.rebuildConvContent()
 						m.syncLayout()
-						m.cmdScroll.SetContent(renderCmdOutput(&m))
-						m.cmdScroll.GotoTop()
 					}
 					return m, tea.Batch(cmds...)
 				}
@@ -1348,11 +1344,7 @@ func (m *Model) handleResourceKey(msg tea.KeyMsg) []tea.Cmd {
 			m.closeResourceOverlay()
 		}
 
-	case key.Matches(msg, keys.Dismiss): // Esc
-		m.killTTS()
-		m.closeResourceOverlay()
-
-	case msg.Type == tea.KeyRunes && string(msg.Runes) == "q":
+	case msg.Type == tea.KeyCtrlX:
 		m.killTTS()
 		m.closeResourceOverlay()
 
@@ -1681,19 +1673,23 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		go playAck()
 
 	case "delete_last":
-		if len(m.exchanges) > 0 {
-			m.deletingExIdx = len(m.exchanges) - 1
-			m.submitVoiceSlashCmd("/delete-last")
-			// Wrap pendingPost to also clear the red highlight when confirmed.
-			if m.pendingPost != nil {
-				origPost := m.pendingPost
-				m.pendingPost = func(model *Model) {
-					origPost(model)
-					model.deletingExIdx = -1
-				}
+		if len(m.exchanges) == 0 {
+			m.setVoiceState(VoiceIdle)
+			cmds = append(cmds, startTTS("Nothing to delete", -1, m))
+		} else {
+			_, err := m.eng.DeleteLast(1)
+			if err == nil {
+				m.exchanges = nil
+				m.loadHistory()
+				m.deletingExIdx = -1
+				m.rebuildConvContent()
+				m.syncLayout()
 			}
 			m.setVoiceState(VoiceIdle)
 			go playAck()
+			if err == nil {
+				cmds = append(cmds, startTTS("Deleted", -1, m))
+			}
 		}
 
 	case "topic_summary":
@@ -1767,6 +1763,9 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 
 	case "resource_edit":
 		m.prefillVoiceCmd("/resource-edit")
+
+	case "export":
+		m.prefillVoiceCmd("/export")
 
 	default:
 		// Unrecognised label — return to previous state.

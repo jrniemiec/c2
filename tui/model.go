@@ -152,6 +152,10 @@ type Model struct {
 	stopVoice           chan struct{} // closed to stop the capture goroutine
 	pendingVoiceSubmit  bool         // true while 500ms auto-submit timer is running
 
+	// mic level indicator — two peaks with different decay rates
+	voicePeakInner float32 // inner positions (1,2): slow decay ×0.90
+	voicePeakOuter float32 // outer positions (0,3): fast decay ×0.72
+
 	// voice FSM
 	voiceState       VoiceState
 	voiceReturnState VoiceState       // state to return to if AWAKE fails (timeout/unrecognized)
@@ -366,7 +370,14 @@ func (m *Model) contextFillPct() int {
 
 // inputPrompt returns the prefix shown in the input pane.
 func (m *Model) inputPrompt() string {
-	return m.eng.TopicName() + "/" + m.eng.Profile().Model + "> "
+	base := m.eng.TopicName() + "/" + m.eng.Profile().Model
+	switch m.voiceState {
+	case VoiceConversing:
+		return base + "-chat> "
+	case VoiceDictating:
+		return base + "-note> "
+	}
+	return base + "> "
 }
 
 // inputVisualHeight returns the number of visual (wrapped) lines the input

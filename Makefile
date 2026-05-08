@@ -14,8 +14,11 @@ else
 endif
 SHERPA_LIB_DIR := $(shell $(GO) env GOPATH)/pkg/mod/github.com/k2-fsa/sherpa-onnx-go-macos@$(SHERPA_VERSION)/lib/$(SHERPA_ARCH)
 
-# Homebrew llvm libc++ (needed for macOS < 14 compatibility)
-LLVM_LIBCXX := $(shell brew --prefix llvm 2>/dev/null)/lib/c++/libc++.1.dylib
+# Homebrew llvm libs (needed for macOS < 14 compatibility)
+LLVM_PREFIX  := $(shell brew --prefix llvm 2>/dev/null)
+LLVM_LIBCXX  := $(LLVM_PREFIX)/lib/c++/libc++.1.dylib
+LLVM_LIBCXXABI := $(LLVM_PREFIX)/lib/c++/libc++abi.1.dylib
+LLVM_LIBUNWIND := $(LLVM_PREFIX)/lib/unwind/libunwind.1.dylib
 
 DIST_NAME := $(BINARY)-v$(VERSION)-darwin-$(GOARCH_OS)
 DIST_DIR  := dist/$(DIST_NAME)
@@ -60,9 +63,24 @@ dist: build
 	@# Copy dylibs
 	cp $(SHERPA_LIB_DIR)/libsherpa-onnx-c-api.dylib $(DIST_DIR)/lib/
 	cp $(SHERPA_LIB_DIR)/libonnxruntime.1.24.4.dylib $(DIST_DIR)/lib/
-	@# Bundle Homebrew libc++ so the binary works on macOS < 14
+	@# Bundle Homebrew llvm libc++ chain so the binary works on macOS < 14
 	@if [ -f "$(LLVM_LIBCXX)" ]; then \
 		cp $(LLVM_LIBCXX) $(DIST_DIR)/lib/libc++.1.dylib; \
+		cp $(LLVM_LIBCXXABI) $(DIST_DIR)/lib/libc++abi.1.dylib; \
+		cp $(LLVM_LIBUNWIND) $(DIST_DIR)/lib/libunwind.1.dylib; \
+		LLVM_ABS=$(shell brew --prefix llvm)/lib/c++; \
+		LLVM_UNWIND=$(shell brew --prefix llvm)/lib/unwind; \
+		for f in $(DIST_DIR)/lib/libc++.1.dylib $(DIST_DIR)/lib/libc++abi.1.dylib; do \
+			install_name_tool \
+				-id @rpath/$$(basename $$f) \
+				-change $$LLVM_ABS/libc++.1.dylib    @rpath/libc++.1.dylib \
+				-change $$LLVM_ABS/libc++abi.1.dylib @rpath/libc++abi.1.dylib \
+				$$f; \
+		done; \
+		install_name_tool \
+			-id @rpath/libunwind.1.dylib \
+			-change $$LLVM_UNWIND/libunwind.1.dylib @rpath/libunwind.1.dylib \
+			$(DIST_DIR)/lib/libunwind.1.dylib; \
 		install_name_tool \
 			-change /usr/lib/libc++.1.dylib @rpath/libc++.1.dylib \
 			$(DIST_DIR)/lib/libonnxruntime.1.24.4.dylib; \
@@ -72,7 +90,9 @@ dist: build
 		codesign --force --sign - $(DIST_DIR)/lib/libonnxruntime.1.24.4.dylib; \
 		codesign --force --sign - $(DIST_DIR)/lib/libsherpa-onnx-c-api.dylib; \
 		codesign --force --sign - $(DIST_DIR)/lib/libc++.1.dylib; \
-		echo "Bundled libc++.1.dylib for macOS < 14 compatibility"; \
+		codesign --force --sign - $(DIST_DIR)/lib/libc++abi.1.dylib; \
+		codesign --force --sign - $(DIST_DIR)/lib/libunwind.1.dylib; \
+		echo "Bundled libc++ chain for macOS < 14 compatibility"; \
 	else \
 		echo "warning: llvm not found, skipping libc++ bundle (macOS 14+ only)"; \
 	fi

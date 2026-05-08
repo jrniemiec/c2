@@ -10,9 +10,10 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/jrniemiec/c2/c2config"
-	"github.com/jrniemiec/c2/tui"
 	"github.com/jrniemiec/c2/config"
 	"github.com/jrniemiec/c2/engine"
+	"github.com/jrniemiec/c2/setup"
+	"github.com/jrniemiec/c2/tui"
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z".
@@ -256,6 +257,28 @@ func run() int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "c2config: %v\n", err)
 		return 1
+	}
+
+	// First-run voice setup: prompt to download models if not yet configured.
+	if !flagTextMode && !c2cfg.IsVoiceConfigured() {
+		if setup.Prompt() {
+			if err := setup.RunVoiceSetup(dataDir, cfgPath); err != nil {
+				fmt.Fprintf(os.Stderr, "c2: voice setup failed: %v\n", err)
+				fmt.Fprintln(os.Stderr, "c2: starting in text mode")
+				flagTextMode = true
+			} else {
+				// Reload config with newly written c2 section.
+				c2cfg, err = c2config.Load(cfgPath)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "c2config reload: %v\n", err)
+					return 1
+				}
+				fmt.Fprintln(os.Stderr, "c2: voice setup complete — starting in voice mode")
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "c2: starting in text mode (run c2 again to set up voice)")
+			flagTextMode = true
+		}
 	}
 
 	topicName := config.EffectiveTopic(cfg, flagTopic)

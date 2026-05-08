@@ -4,7 +4,7 @@ LDFLAGS ?= -X main.version=$(VERSION)
 BINARY  := c2
 INSTALL := $(HOME)/dev/bin/$(BINARY)
 
-.PHONY: build install run test fmt vet clean
+.PHONY: build install run test fmt vet clean release
 
 build:
 	@mkdir -p bin
@@ -29,3 +29,8 @@ vet:
 
 clean:
 	rm -rf bin/
+
+release:
+	@if [ -z "$(VERSION)" ]; then echo "usage: make release VERSION=x.y.z"; exit 1; fi
+	git tag v$(VERSION)
+	git push origin v$(VERSION)

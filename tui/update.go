@@ -374,6 +374,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 
+		// Ctrl+Space: keyboard wake word toggle (voice mode only).
+		if m.mode == modeVoice && key.Matches(msg, keys.WakeWord) {
+			switch m.voiceState {
+			case VoiceAwake:
+				// Already awake — cancel back to previous state.
+				dbg("fsm: ctrl+space cancel AWAKE → %s", m.voiceReturnState)
+				if m.awakeTimer != nil {
+					m.awakeTimer.Stop()
+					m.awakeTimer = nil
+				}
+				m.setVoiceState(m.voiceReturnState)
+				go playBeep(beepUnrecognized)
+			default:
+				// Activate AWAKE — same as "computer" KWS event.
+				dbg("fsm: ctrl+space → AWAKE")
+				m.suspendTTS()
+				m.voiceReturnState = m.voiceState
+				m.voiceFailCount = 0
+				m.setVoiceState(VoiceAwake)
+				m.awakeTimer = time.AfterFunc(5*time.Second, func() {
+					if programSend != nil {
+						programSend(voiceAwakeTimeoutMsg{})
+					}
+				})
+				go playBeep(beepWakeAck)
+			}
+			return m, tea.Batch(cmds...)
+		}
+
 		// Bracketed paste: entire pasted content arrives as one KeyMsg with Paste=true.
 		if msg.Paste && m.focus == paneInput && !m.streaming && m.pendingAction == nil {
 			// Normalize \r\n and bare \r to \n (terminals paste with \r endings).
@@ -1610,8 +1639,10 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 
 	case "voice_status":
 		returnState := m.voiceReturnState
+		topic := m.eng.TopicName()
+		model := m.eng.Profile().Model
 		m.setVoiceState(m.voiceReturnState)
-		go sayVoiceStatus(returnState)
+		go sayVoiceStatus(returnState, topic, model)
 
 	case "status":
 		m.submitVoiceSlashCmd("/status")
@@ -1897,20 +1928,21 @@ func sayPrompt(n int) {
 }
 
 // sayVoiceStatus speaks the current FSM context via macOS say(1).
-func sayVoiceStatus(returnState VoiceState) {
-	var phrase string
+func sayVoiceStatus(returnState VoiceState, topic, model string) {
+	var state string
 	switch returnState {
 	case VoiceIdle:
-		phrase = "Idle, ready for commands"
+		state = "Idle"
 	case VoiceDictating:
-		phrase = "Dictating"
+		state = "Dictating"
 	case VoiceConversing:
-		phrase = "In conversation"
+		state = "Conversing"
 	case VoiceExecuting:
-		phrase = "Executing"
+		state = "Executing"
 	default:
-		phrase = "Ready"
+		state = "Ready"
 	}
+	phrase := fmt.Sprintf("%s. Topic: %s. Model: %s.", state, topic, model)
 	dbg("beep: say voice status %q", phrase)
 	args := []string{phrase}
 	if activeC2Cfg.TTSVoice != "" {

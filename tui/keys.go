@@ -19,6 +19,7 @@ type keyMap struct {
 	FillCompletion key.Binding
 	SwitchMode        key.Binding
 	CopyToClipboard       key.Binding
+	WakeWord key.Binding // Ctrl+Space: toggle AWAKE state (voice mode only)
 	DEVToggleTranscribing key.Binding // dev-only: simulate transcribing state
 }
 
@@ -82,6 +83,10 @@ var keys = keyMap{
 	CopyToClipboard: key.NewBinding(
 		key.WithKeys("ctrl+s"),
 		key.WithHelp("ctrl+s", "copy to clipboard"),
+	),
+	WakeWord: key.NewBinding(
+		key.WithKeys("ctrl+@"),
+		key.WithHelp("ctrl+space", "activate/cancel voice command (voice mode only)"),
 	),
 	DEVToggleTranscribing: key.NewBinding(
 		key.WithKeys("ctrl+y"),

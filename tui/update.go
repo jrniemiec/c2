@@ -1158,6 +1158,15 @@ func startTTS(text string, exIdx int, m *Model) tea.Cmd {
 	return startTTSSay(text, gen, m)
 }
 
+// startTTSAck speaks a short acknowledgement word at a fixed slower rate.
+func startTTSAck(text string, m *Model) tea.Cmd {
+	saved := m.ttsRate
+	m.ttsRate = 140
+	cmd := startTTS(text, -1, m)
+	m.ttsRate = saved
+	return cmd
+}
+
 // startTTSSay uses macOS say(1).
 func startTTSSay(text string, gen int, m *Model) tea.Cmd {
 	args := []string{"-r", fmt.Sprintf("%d", m.ttsRate)}
@@ -1533,7 +1542,8 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 	case "session_start", "talk_start":
 		m.voiceSession = true
 		m.setVoiceState(VoiceConversing)
-		go playBeep(beepWakeAck)
+		// go playBeep(beepWakeAck) — replaced by spoken "Conversing"
+		cmds = append(cmds, startTTSAck("Conversing", m))
 
 	case "session_resume":
 		if m.voiceSession {
@@ -1566,7 +1576,8 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		m.pendingDictCmd = "note"
 		m.input.SetValue("")
 		m.setVoiceState(VoiceDictating)
-		go playBeep(beepDictStart)
+		// go playBeep(beepDictStart) — replaced by spoken "Dictating"
+		cmds = append(cmds, startTTSAck("Dictating", m))
 
 	case "chat_replay", "chat_play_last":
 		if len(m.exchanges) > 0 {

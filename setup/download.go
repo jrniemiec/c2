@@ -170,13 +170,13 @@ func writeC2Config(cfgPath, vadPath, whisperDir, kokoroDir string) error {
 		"stt_decoder":  filepath.Join(whisperDir, "tiny.en-decoder.int8.onnx"),
 		"stt_tokens":   filepath.Join(whisperDir, "tiny.en-tokens.txt"),
 		"stt_language": "en",
-		"tts_backend":  "kokoro",
+		"tts_backend":  "say",
 		"tts_model":    filepath.Join(kokoroDir, "model.onnx"),
 		"tts_voices":   filepath.Join(kokoroDir, "voices.bin"),
 		"tts_tokens":   filepath.Join(kokoroDir, "tokens.txt"),
 		"tts_data_dir": filepath.Join(kokoroDir, "espeak-ng-data"),
-		"tts_voice":    "en-us",
-		"tts_speed":    1.0,
+		"tts_voice":    "Samantha",
+		"tts_speed":    200,
 	}
 
 	b, err := json.Marshal(c2Section)

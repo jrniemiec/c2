@@ -14,10 +14,10 @@ import (
 
 	"github.com/jrniemiec/c2/c2config"
 	"github.com/jrniemiec/c2/speech"
-	"github.com/jrniemiec/lore/config"
-	"github.com/jrniemiec/lore/core"
-	"github.com/jrniemiec/lore/engine"
-	"github.com/jrniemiec/lore/store"
+	"github.com/jrniemiec/c2/config"
+	"github.com/jrniemiec/c2/core"
+	"github.com/jrniemiec/c2/engine"
+	"github.com/jrniemiec/c2/store"
 )
 
 // focusPane identifies which pane has keyboard focus.

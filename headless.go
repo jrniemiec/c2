@@ -13,10 +13,10 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/jrniemiec/lore/config"
-	"github.com/jrniemiec/lore/core"
-	"github.com/jrniemiec/lore/engine"
-	"github.com/jrniemiec/lore/store"
+	"github.com/jrniemiec/c2/config"
+	"github.com/jrniemiec/c2/core"
+	"github.com/jrniemiec/c2/engine"
+	"github.com/jrniemiec/c2/store"
 )
 
 func runHeadless(cfg config.Config, cfgPath string, chatLabels bool) int {

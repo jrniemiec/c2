@@ -15,9 +15,9 @@ import (
 
 	"github.com/jrniemiec/c2/audio"
 	"github.com/jrniemiec/c2/speech"
-	"github.com/jrniemiec/lore/config"
-	"github.com/jrniemiec/lore/core"
-	"github.com/jrniemiec/lore/engine"
+	"github.com/jrniemiec/c2/config"
+	"github.com/jrniemiec/c2/core"
+	"github.com/jrniemiec/c2/engine"
 )
 
 // Update handles all incoming messages.

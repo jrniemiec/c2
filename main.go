@@ -11,8 +11,8 @@ import (
 
 	"github.com/jrniemiec/c2/c2config"
 	"github.com/jrniemiec/c2/tui"
-	"github.com/jrniemiec/lore/config"
-	"github.com/jrniemiec/lore/engine"
+	"github.com/jrniemiec/c2/config"
+	"github.com/jrniemiec/c2/engine"
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z".

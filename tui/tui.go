@@ -11,8 +11,8 @@ import (
 	"github.com/jrniemiec/c2/audio"
 	"github.com/jrniemiec/c2/c2config"
 	"github.com/jrniemiec/c2/speech"
-	"github.com/jrniemiec/lore/config"
-	"github.com/jrniemiec/lore/engine"
+	"github.com/jrniemiec/c2/config"
+	"github.com/jrniemiec/c2/engine"
 )
 
 var debugLog *log.Logger

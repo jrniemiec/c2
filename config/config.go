@@ -33,7 +33,7 @@ type ProviderProfile struct {
 	Info              map[string]any `json:"info,omitempty"`
 }
 
-// Config is the top-level lore configuration.
+// Config is the top-level c2 configuration.
 type Config struct {
 	TopicsRoot     string                     `json:"topics_root"`
 	DefaultTopic   string                     `json:"default_topic,omitempty"`
@@ -47,26 +47,26 @@ type Config struct {
 	FoldOnStart *bool `json:"fold_on_start,omitempty"` // nil = use default (false)
 }
 
-// LoreData returns the lore data directory ($LORE_DATA or ~/.lore).
-func LoreData() string {
-	if h := os.Getenv("LORE_DATA"); h != "" {
+// DataDir returns the c2 data directory ($C2_DATA or ~/.c2).
+func DataDir() string {
+	if h := os.Getenv("C2_DATA"); h != "" {
 		return h
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ".lore"
+		return ".c2"
 	}
-	return filepath.Join(home, ".lore")
+	return filepath.Join(home, ".c2")
 }
 
-// DefaultConfigPath returns the path to lore's config.json.
+// DefaultConfigPath returns the path to c2's config.json.
 func DefaultConfigPath() string {
-	return filepath.Join(LoreData(), "config.json")
+	return filepath.Join(DataDir(), "config.json")
 }
 
 // DefaultTopicsRoot returns the default topics directory.
 func DefaultTopicsRoot() string {
-	return filepath.Join(LoreData(), "topics")
+	return filepath.Join(DataDir(), "topics")
 }
 
 // Load reads config from path. Missing file returns safe defaults.
@@ -170,7 +170,7 @@ func SaveAtomic(path string, cfg Config) error {
 	return os.Rename(tmp, path)
 }
 
-// Bootstrap creates the lore data directory on first run.
+// Bootstrap creates the c2 data directory on first run.
 // Returns true if bootstrap ran (caller should exit after notifying the user).
 // No-op if dataDir already exists.
 func Bootstrap(dataDir string) (bool, error) {
@@ -197,15 +197,15 @@ func Bootstrap(dataDir string) (bool, error) {
 		return false, fmt.Errorf("write config: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "lore: first run — created %s\n", dataDir)
-	fmt.Fprintf(os.Stderr, "lore: created %s\n", defaultTopicDir)
-	fmt.Fprintf(os.Stderr, "lore: copied default config to %s\n", cfgPath)
-	fmt.Fprintf(os.Stderr, "lore: → edit %s to set your default profile, then run lore again.\n", cfgPath)
-	fmt.Fprintf(os.Stderr, "lore:\n")
-	fmt.Fprintf(os.Stderr, "lore: API keys are read from environment variables:\n")
-	fmt.Fprintf(os.Stderr, "lore:   Anthropic  — ANTHROPIC_API_KEY  (or LORE_ANTHROPIC_API_KEY)\n")
-	fmt.Fprintf(os.Stderr, "lore:   OpenAI     — OPENAI_API_KEY     (or LORE_OPENAI_API_KEY)\n")
-	fmt.Fprintf(os.Stderr, "lore:   Ollama     — no key needed, set LORE_OLLAMA_HOST if not localhost\n")
+	fmt.Fprintf(os.Stderr, "c2: first run — created %s\n", dataDir)
+	fmt.Fprintf(os.Stderr, "c2: created %s\n", defaultTopicDir)
+	fmt.Fprintf(os.Stderr, "c2: copied default config to %s\n", cfgPath)
+	fmt.Fprintf(os.Stderr, "c2: → edit %s to set your default profile, then run c2 again.\n", cfgPath)
+	fmt.Fprintf(os.Stderr, "c2:\n")
+	fmt.Fprintf(os.Stderr, "c2: API keys are read from environment variables:\n")
+	fmt.Fprintf(os.Stderr, "c2:   Anthropic  — ANTHROPIC_API_KEY  (or C2_ANTHROPIC_API_KEY)\n")
+	fmt.Fprintf(os.Stderr, "c2:   OpenAI     — OPENAI_API_KEY     (or C2_OPENAI_API_KEY)\n")
+	fmt.Fprintf(os.Stderr, "c2:   Ollama     — no key needed, set C2_OLLAMA_HOST if not localhost\n")
 
 	return true, nil
 }

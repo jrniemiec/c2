@@ -23,7 +23,7 @@ type OllamaProvider struct {
 
 func NewOllamaProvider(host, model string) (*OllamaProvider, error) {
 	if host == "" {
-		host = strings.TrimSpace(os.Getenv("LORE_OLLAMA_HOST"))
+		host = strings.TrimSpace(os.Getenv("C2_OLLAMA_HOST"))
 	}
 	host = strings.TrimRight(strings.TrimSpace(host), "/")
 	if host == "" {

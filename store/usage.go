@@ -23,9 +23,9 @@ type UsageEntry struct {
 	Estimated    bool      `json:"estimated,omitempty"`
 }
 
-// UsageLogPath returns the path to usage.jsonl relative to loreData.
-func UsageLogPath(loreData string) string {
-	return filepath.Join(loreData, "usage.jsonl")
+// UsageLogPath returns the path to usage.jsonl relative to dataDir.
+func UsageLogPath(dataDir string) string {
+	return filepath.Join(dataDir, "usage.jsonl")
 }
 
 // AppendUsageLog appends one entry to the JSONL log file (creates if needed).

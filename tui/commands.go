@@ -362,7 +362,7 @@ func cmdTopicHistory(m *Model, args []string) cmdResult {
 		}
 		lines = append(lines, fmt.Sprintf("you · %s", p.user.Time.Format("15:04")))
 		lines = append(lines, p.user.Content)
-		lines = append(lines, fmt.Sprintf("lore · %s", p.asst.Time.Format("15:04")))
+		lines = append(lines, fmt.Sprintf("c2 · %s", p.asst.Time.Format("15:04")))
 		lines = append(lines, p.asst.Content)
 	}
 	return okResult("/topic-history", lines)
@@ -803,7 +803,7 @@ func cmdStatus(m *Model) cmdResult {
 	lines := []string{
 		fmt.Sprintf("topic:    %s", m.eng.TopicName()),
 		fmt.Sprintf("profile:  %s (%s/%s)", m.eng.ProfileCode(), p.Provider, p.Model),
-		fmt.Sprintf("lore home: %s", m.eng.LoreData()),
+		fmt.Sprintf("c2 home:  %s", m.eng.DataDir()),
 		fmt.Sprintf("terminal: %s", TerminalName()),
 		fmt.Sprintf("theme:    %s", m.themeMode),
 	}
@@ -811,7 +811,7 @@ func cmdStatus(m *Model) cmdResult {
 }
 
 func cmdStats(m *Model) cmdResult {
-	logPath := store.UsageLogPath(m.eng.LoreData())
+	logPath := store.UsageLogPath(m.eng.DataDir())
 	entries, err := store.ReadUsageLog(logPath)
 	if err != nil || len(entries) == 0 {
 		return okResult("/stats", []string{"(no usage recorded)"})
@@ -1013,7 +1013,7 @@ func allCompletions() []completionEntry {
 		{"/play-all", "play all entries via TTS (toggle)"},
 		{"/block-keys", "show keys available when a block is focused"},
 		{"/theme", "switch or show theme: light | dark | auto | options"},
-		{"/exit", "exit lore"},
+		{"/exit", "exit c2"},
 	}
 }
 
@@ -1235,7 +1235,7 @@ func cmdHelp(cmd string, args []string) cmdResult {
 			{"/export [file]", "export conversation; default saves to topic resources as export-topic-date.md"},
 			{"/help [group]", "show all commands or commands for a group"},
 			{"/delete-last [n]", "delete last N exchanges from history (default 1)"},
-			{"/exit", "exit lore"},
+			{"/exit", "exit c2"},
 		},
 		"notes": {
 			{"// <text>", "save a personal note (not sent to LLM)"},

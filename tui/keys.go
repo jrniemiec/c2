@@ -2,7 +2,7 @@ package tui
 
 import "github.com/charmbracelet/bubbles/key"
 
-// keyMap defines all lore key bindings.
+// keyMap defines all c2 key bindings.
 type keyMap struct {
 	Send          key.Binding
 	Newline       key.Binding

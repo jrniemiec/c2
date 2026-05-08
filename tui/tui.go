@@ -37,7 +37,7 @@ var programSend func(tea.Msg)
 var activeC2Cfg c2config.C2Config
 
 // Start launches the TUI and blocks until the user quits.
-func Start(eng *engine.Engine, cfg config.Config, loreData string, c2cfg c2config.C2Config, theme string, chatLabels bool, foldLines int, foldOnStart bool, textMode bool) error {
+func Start(eng *engine.Engine, cfg config.Config, dataDir string, c2cfg c2config.C2Config, theme string, chatLabels bool, foldLines int, foldOnStart bool, textMode bool) error {
 	DetectTerminal()
 	ApplyTheme(theme)
 	AdjustThemeForTerminal()
@@ -50,7 +50,7 @@ func Start(eng *engine.Engine, cfg config.Config, loreData string, c2cfg c2confi
 
 	activeC2Cfg = c2cfg
 
-	m := New(eng, cfg, loreData)
+	m := New(eng, cfg, dataDir)
 	m.themeMode = theme
 	m.chatLabels = chatLabels
 	m.foldLines = foldLines

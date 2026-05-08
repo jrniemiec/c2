@@ -23,7 +23,7 @@ import (
 type Engine struct {
 	cfg      config.Config
 	cfgPath  string
-	loreData string
+	dataDir string
 	st       core.Store
 
 	// active session state
@@ -56,11 +56,11 @@ type ChatResult struct {
 
 // New creates an Engine, initialising the provider for profileCode and loading
 // the topic. Pass empty strings to use the config defaults.
-func New(cfg config.Config, cfgPath, loreData, topicName, profileCode string) (*Engine, error) {
+func New(cfg config.Config, cfgPath, dataDir, topicName, profileCode string) (*Engine, error) {
 	e := &Engine{
-		cfg:      cfg,
-		cfgPath:  cfgPath,
-		loreData: loreData,
+		cfg:     cfg,
+		cfgPath: cfgPath,
+		dataDir: dataDir,
 		st:       store.New(cfg.TopicsRoot),
 	}
 	if err := e.SwitchProfile(profileCode); err != nil {
@@ -189,7 +189,7 @@ func (e *Engine) Topic() *core.Topic             { return e.topic }
 func (e *Engine) ProfileCode() string            { return e.profileCode }
 func (e *Engine) Profile() config.ProviderProfile { return e.profile }
 func (e *Engine) Config() config.Config          { return e.cfg }
-func (e *Engine) LoreData() string               { return e.loreData }
+func (e *Engine) DataDir() string                { return e.dataDir }
 
 func (e *Engine) IsStreaming() bool {
 	e.mu.Lock()
@@ -396,7 +396,7 @@ func (e *Engine) SetDefaultProfile(code string) error {
 // --- Usage logging --------------------------------------------------------
 
 func (e *Engine) appendUsageLog(u core.Usage, ts time.Time) {
-	logPath := store.UsageLogPath(e.loreData)
+	logPath := store.UsageLogPath(e.dataDir)
 	inPer1M, outPer1M, hasPricing := config.ExtractPricing(e.profile.Info)
 	var cost float64
 	if hasPricing {

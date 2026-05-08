@@ -20,7 +20,7 @@ import (
 )
 
 func runHeadless(cfg config.Config, cfgPath string, chatLabels bool) int {
-	loreData := config.LoreData()
+	dataDir := config.DataDir()
 	st := store.New(cfg.TopicsRoot)
 	topicName := config.EffectiveTopic(cfg, flagTopic)
 
@@ -42,7 +42,7 @@ func runHeadless(cfg config.Config, cfgPath string, chatLabels bool) int {
 		return cmdShowProviders(cfg)
 	}
 	if flagStats {
-		return cmdShowStats(loreData, topicName)
+		return cmdShowStats(dataDir, topicName)
 	}
 	if flagTopicDefaultSet != "" {
 		return cmdSetDefaultTopic(cfgPath, cfg, flagTopicDefaultSet)
@@ -84,25 +84,25 @@ func runHeadless(cfg config.Config, cfgPath string, chatLabels bool) int {
 		return cmdRemoveResource(st, topicName, flagResourceRemove, flagForce)
 	}
 	if flagNote != "" {
-		return cmdAddNote(cfg, cfgPath, loreData, topicName, flagNote)
+		return cmdAddNote(cfg, cfgPath, dataDir, topicName, flagNote)
 	}
 	if flagDeleteLast >= 0 {
 		n := flagDeleteLast
 		if n == 0 {
 			n = 1
 		}
-		return cmdDeleteLast(cfg, cfgPath, loreData, topicName, n, flagForce)
+		return cmdDeleteLast(cfg, cfgPath, dataDir, topicName, n, flagForce)
 	}
 
 	// --- chat (needs provider via engine) ---
-	return runChat(cfg, cfgPath, loreData, topicName, chatLabels)
+	return runChat(cfg, cfgPath, dataDir, topicName, chatLabels)
 }
 
 // =============================================================================
 // Chat
 // =============================================================================
 
-func runChat(cfg config.Config, cfgPath, loreData, topicName string, chatLabels bool) int {
+func runChat(cfg config.Config, cfgPath, dataDir, topicName string, chatLabels bool) int {
 	prompt, err := resolvePrompt()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "prompt: %v\n", err)
@@ -123,10 +123,10 @@ func runChat(cfg config.Config, cfgPath, loreData, topicName string, chatLabels 
 	}
 
 	if flagAllProfiles {
-		return runAllProfiles(cfg, cfgPath, loreData, topicName, prompt, chatLabels)
+		return runAllProfiles(cfg, cfgPath, dataDir, topicName, prompt, chatLabels)
 	}
 
-	e, err := engine.New(cfg, cfgPath, loreData, topicName, flagProfile)
+	e, err := engine.New(cfg, cfgPath, dataDir, topicName, flagProfile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "engine: %v\n", err)
 		return 1
@@ -141,11 +141,11 @@ func runChat(cfg config.Config, cfgPath, loreData, topicName string, chatLabels 
 	return doChat(e, prompt, chatLabels)
 }
 
-func runAllProfiles(cfg config.Config, cfgPath, loreData, topicName, prompt string, chatLabels bool) int {
+func runAllProfiles(cfg config.Config, cfgPath, dataDir, topicName, prompt string, chatLabels bool) int {
 	exitCode := 0
 	for code := range cfg.Profiles {
 		fmt.Fprintf(os.Stderr, "\n=== profile: %s ===\n", code)
-		e, err := engine.New(cfg, cfgPath, loreData, topicName, code)
+		e, err := engine.New(cfg, cfgPath, dataDir, topicName, code)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "engine: %v\n", err)
 			exitCode = 1
@@ -396,8 +396,8 @@ func cmdShowProviders(cfg config.Config) int {
 	return 0
 }
 
-func cmdShowStats(loreData, topicFilter string) int {
-	logPath := store.UsageLogPath(loreData)
+func cmdShowStats(dataDir, topicFilter string) int {
+	logPath := store.UsageLogPath(dataDir)
 	entries, err := store.ReadUsageLog(logPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "read usage log: %v\n", err)
@@ -600,7 +600,7 @@ func cmdSetSystem(st *store.FileStore, topicName, system, systemFile string) int
 	return 0
 }
 
-func cmdDeleteLast(cfg config.Config, cfgPath, loreData, topicName string, n int, force bool) int {
+func cmdDeleteLast(cfg config.Config, cfgPath, dataDir, topicName string, n int, force bool) int {
 	noun := "exchange"
 	if n > 1 {
 		noun = fmt.Sprintf("%d exchanges", n)
@@ -609,7 +609,7 @@ func cmdDeleteLast(cfg config.Config, cfgPath, loreData, topicName string, n int
 		fmt.Fprintln(os.Stderr, "aborted")
 		return 0
 	}
-	eng, err := engine.New(cfg, cfgPath, loreData, topicName, flagProfile)
+	eng, err := engine.New(cfg, cfgPath, dataDir, topicName, flagProfile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "engine: %v\n", err)
 		return 1
@@ -623,8 +623,8 @@ func cmdDeleteLast(cfg config.Config, cfgPath, loreData, topicName string, n int
 	return 0
 }
 
-func cmdAddNote(cfg config.Config, cfgPath, loreData, topicName, text string) int {
-	eng, err := engine.New(cfg, cfgPath, loreData, topicName, flagProfile)
+func cmdAddNote(cfg config.Config, cfgPath, dataDir, topicName, text string) int {
+	eng, err := engine.New(cfg, cfgPath, dataDir, topicName, flagProfile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "engine: %v\n", err)
 		return 1
@@ -822,9 +822,9 @@ func cmdHelpNoun(noun string) int {
 		"  @~/path             home-relative filesystem path",
 		"",
 		"  Examples:",
-		"    lore 'explain this' @main.go",
-		"    lore 'compare @old.py and @new.py and list the differences'",
-		"    lore 'summarize @notes.txt and cross-check with @~/docs/spec.md'",
+		"    c2 'explain this' @main.go",
+		"    c2 'compare @old.py and @new.py and list the differences'",
+		"    c2 'summarize @notes.txt and cross-check with @~/docs/spec.md'",
 		"",
 	}
 	order := []string{"topic", "resource", "profile", "system", "session", "info", "files"}

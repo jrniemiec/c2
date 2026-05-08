@@ -79,7 +79,7 @@ type Model struct {
 	eng      *engine.Engine
 	cfg      config.Config
 	c2cfg    c2config.C2Config
-	loreData string
+	dataDir string
 
 	// theme
 	themeMode  string // "auto", "light", "dark"
@@ -222,7 +222,7 @@ type cmdResult struct {
 }
 
 // New creates a ready-to-run Model, loading existing history.
-func New(eng *engine.Engine, cfg config.Config, loreData string) Model {
+func New(eng *engine.Engine, cfg config.Config, dataDir string) Model {
 	ta := textarea.New()
 	ta.Placeholder = ""
 	ta.ShowLineNumbers = false
@@ -256,7 +256,7 @@ func New(eng *engine.Engine, cfg config.Config, loreData string) Model {
 	m := Model{
 		eng:             eng,
 		cfg:             cfg,
-		loreData:        loreData,
+		dataDir:         dataDir,
 		conv:            vp,
 		input:           ta,
 		focus:           paneInput,
@@ -331,7 +331,7 @@ func (m *Model) loadHistory() {
 
 // loadUsageStats reads the usage log into topicStats, sessionStats, and usageByTs.
 func (m *Model) loadUsageStats() {
-	logPath := store.UsageLogPath(m.loreData)
+	logPath := store.UsageLogPath(m.dataDir)
 	entries, err := store.ReadUsageLog(logPath)
 	if err != nil || len(entries) == 0 {
 		return

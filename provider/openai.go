@@ -17,12 +17,12 @@ type OpenAIProvider struct {
 }
 
 func NewOpenAIProvider(model string) (*OpenAIProvider, error) {
-	key := strings.TrimSpace(os.Getenv("LORE_OPENAI_API_KEY"))
+	key := strings.TrimSpace(os.Getenv("C2_OPENAI_API_KEY"))
 	if key == "" {
 		key = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
 	}
 	if key == "" {
-		return nil, errors.New("LORE_OPENAI_API_KEY or OPENAI_API_KEY not set")
+		return nil, errors.New("C2_OPENAI_API_KEY or OPENAI_API_KEY not set")
 	}
 	return &OpenAIProvider{
 		client: openai.NewClient(option.WithAPIKey(key)),

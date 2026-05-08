@@ -211,10 +211,9 @@ func c2Data() string {
 }
 
 func run() int {
-	// Point lore's config package at ~/.c2 instead of ~/.lore.
-	os.Setenv("LORE_DATA", c2Data())
-	loreData := config.LoreData()
-	bootstrapped, err := config.Bootstrap(loreData)
+	os.Setenv("C2_DATA", c2Data())
+	dataDir := config.DataDir()
+	bootstrapped, err := config.Bootstrap(dataDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bootstrap: %v\n", err)
 		return 1
@@ -260,7 +259,7 @@ func run() int {
 	}
 
 	topicName := config.EffectiveTopic(cfg, flagTopic)
-	e, err := engine.New(cfg, cfgPath, loreData, topicName, flagProfile)
+	e, err := engine.New(cfg, cfgPath, dataDir, topicName, flagProfile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "engine: %v\n", err)
 		return 1
@@ -271,7 +270,7 @@ func run() int {
 			return 1
 		}
 	}
-	if err := tui.Start(e, cfg, loreData, c2cfg, flagTheme, chatLabels, foldLines, foldOnStart, flagTextMode); err != nil {
+	if err := tui.Start(e, cfg, dataDir, c2cfg, flagTheme, chatLabels, foldLines, foldOnStart, flagTextMode); err != nil {
 		fmt.Fprintf(os.Stderr, "tui: %v\n", err)
 		return 1
 	}

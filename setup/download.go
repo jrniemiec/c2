@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	vadURL     = "https://github.com/k2-fsa/sherpa-onnx/releases/download/vad-models/silero_vad.onnx"
+	vadURL     = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
 	whisperURL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-tiny.en.tar.bz2"
 	kokoroURL  = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2"
 )

@@ -14,6 +14,9 @@ else
 endif
 SHERPA_LIB_DIR := $(shell $(GO) env GOPATH)/pkg/mod/github.com/k2-fsa/sherpa-onnx-go-macos@$(SHERPA_VERSION)/lib/$(SHERPA_ARCH)
 
+# Homebrew llvm libc++ (needed for macOS < 14 compatibility)
+LLVM_LIBCXX := $(shell brew --prefix llvm 2>/dev/null)/lib/c++/libc++.1.dylib
+
 DIST_NAME := $(BINARY)-v$(VERSION)-darwin-$(GOARCH_OS)
 DIST_DIR  := dist/$(DIST_NAME)
 
@@ -57,7 +60,23 @@ dist: build
 	@# Copy dylibs
 	cp $(SHERPA_LIB_DIR)/libsherpa-onnx-c-api.dylib $(DIST_DIR)/lib/
 	cp $(SHERPA_LIB_DIR)/libonnxruntime.1.24.4.dylib $(DIST_DIR)/lib/
-	@# Re-sign after modification
+	@# Bundle Homebrew libc++ so the binary works on macOS < 14
+	@if [ -f "$(LLVM_LIBCXX)" ]; then \
+		cp $(LLVM_LIBCXX) $(DIST_DIR)/lib/libc++.1.dylib; \
+		install_name_tool \
+			-change /usr/lib/libc++.1.dylib @rpath/libc++.1.dylib \
+			$(DIST_DIR)/lib/libonnxruntime.1.24.4.dylib; \
+		install_name_tool \
+			-change /usr/lib/libc++.1.dylib @rpath/libc++.1.dylib \
+			$(DIST_DIR)/lib/libsherpa-onnx-c-api.dylib; \
+		codesign --force --sign - $(DIST_DIR)/lib/libonnxruntime.1.24.4.dylib; \
+		codesign --force --sign - $(DIST_DIR)/lib/libsherpa-onnx-c-api.dylib; \
+		codesign --force --sign - $(DIST_DIR)/lib/libc++.1.dylib; \
+		echo "Bundled libc++.1.dylib for macOS < 14 compatibility"; \
+	else \
+		echo "warning: llvm not found, skipping libc++ bundle (macOS 14+ only)"; \
+	fi
+	@# Re-sign binary after modification
 	codesign --force --sign - $(DIST_DIR)/bin/$(BINARY)
 	@# Create tarball
 	cd dist && tar czf $(DIST_NAME).tar.gz $(DIST_NAME)/

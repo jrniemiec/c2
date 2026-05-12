@@ -23,12 +23,13 @@ var version = "dev"
 
 var (
 	// mode
-	flagNoTUI       bool
-	flagTextMode    bool
-	flagTheme       string
-	flagChatLabels  bool
-	flagFoldLines   int
-	flagFoldOnStart bool
+	flagNoTUI            bool
+	flagTextMode         bool
+	flagTheme            string
+	flagChatLabels       bool
+	flagFoldLines        int
+	flagFoldOnStart      bool
+	flagAckAllDeletions  bool
 
 	// core
 	flagProfile string
@@ -92,6 +93,7 @@ func init() {
 	flag.BoolVar(&flagChatLabels, "chat-labels", true, "prefix each turn with [you]: / [profile]:")
 	flag.IntVar(&flagFoldLines, "fold-lines", 20, "lines threshold before folding entries (0 = never fold)")
 	flag.BoolVar(&flagFoldOnStart, "fold-on-start", false, "start with all long entries folded")
+	flag.BoolVar(&flagAckAllDeletions, "ack-all-deletions", false, "require confirmation for all deletions, including single entries")
 
 	// core
 	flag.StringVar(&flagProfile, "profile", "", "provider profile code")
@@ -293,7 +295,7 @@ func run() int {
 			return 1
 		}
 	}
-	if err := tui.Start(e, cfg, dataDir, c2cfg, flagTheme, chatLabels, foldLines, foldOnStart, flagTextMode); err != nil {
+	if err := tui.Start(e, cfg, dataDir, c2cfg, flagTheme, chatLabels, foldLines, foldOnStart, flagAckAllDeletions, flagTextMode); err != nil {
 		fmt.Fprintf(os.Stderr, "tui: %v\n", err)
 		return 1
 	}

@@ -55,6 +55,12 @@ type exchange struct {
 
 // Bubbletea message types.
 type streamDeltaMsg string
+type correctionDoneMsg struct {
+	text    string
+	origLen int // length of original text, to detect changes
+	err     error
+}
+type correctionFlashMsg struct{}
 type streamDoneMsg struct {
 	result engine.ChatResult
 	err    error
@@ -144,6 +150,14 @@ type Model struct {
 	// paste mode (active when clipboard content exceeds threshold)
 	pastedBlob string // full text to send; empty = not in paste mode
 
+	// input correction (Ctrl+R)
+	correcting           bool       // true while correction LLM call is in flight
+	correctionVoiceState VoiceState // voice state to restore after correction
+	correctionFlash      string     // non-empty: flash message shown in status bar
+
+	// deletion behaviour
+	ackAllDeletions bool // when true, all deletions require confirmation (--ack-all-deletions)
+
 	// c2 interaction mode
 	mode         interactionMode
 	transcribing bool // true while VAD/STT is processing speech
@@ -201,6 +215,7 @@ type Model struct {
 	resourceCursor   int            // highlighted line index
 	resourceScroll   viewport.Model // scrollable viewport for the overlay
 	resourceTTSText  string         // text currently being spoken (for speed-change restart)
+	resourceTTSQueue []int          // line indices still to be spoken (line-by-line playback)
 	preFocus         focusPane      // focus state to restore on overlay close
 	preFocusedExIdx  int            // focusedExIdx to restore on overlay close
 
@@ -521,6 +536,8 @@ func (m *Model) rebuildConvContent() {
 	m.conv.SetContent(content)
 	if m.focus == paneConv && m.focusedExIdx >= 0 && m.focusedExIdx < len(offsets) {
 		m.conv.SetYOffset(offsets[m.focusedExIdx])
+	} else if !m.userScrolled && m.ttsExIdx >= 0 && m.ttsExIdx < len(offsets) {
+		m.conv.SetYOffset(offsets[m.ttsExIdx])
 	} else if !m.userScrolled {
 		m.conv.GotoBottom()
 	}
@@ -558,10 +575,27 @@ func (m *Model) killTTS() {
 	m.ttsQueue = nil
 	m.ttsPendingSentences = nil
 	m.streamSentenceBuf = ""
+	m.resourceTTSQueue = nil
 	if m.ttsCmd != nil {
 		cmd := m.ttsCmd
 		m.ttsCmd = nil
 		// Kill the entire process group (say forks a child for audio synthesis).
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	}
+	if m.ttsKokoroStop != nil {
+		close(m.ttsKokoroStop)
+		m.ttsKokoroStop = nil
+	}
+}
+
+// killTTSAudio stops only the audio process/goroutine without clearing any queues.
+// Used when restarting the current line at a new speed ([/] in resource view).
+func killTTSAudio(m *Model) {
+	if m.ttsCmd != nil {
+		cmd := m.ttsCmd
+		m.ttsCmd = nil
 		if cmd.Process != nil {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
@@ -648,6 +682,7 @@ func (m *Model) closeResourceOverlay() {
 	m.resourceName = ""
 	m.resourceCursor = 0
 	m.resourceTTSText = ""
+	m.resourceTTSQueue = nil
 	if m.preFocus == paneInput {
 		m.input.Focus()
 	}

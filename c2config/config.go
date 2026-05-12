@@ -46,6 +46,14 @@ type C2Config struct {
 
 	// Audio
 	InputDevice string `json:"input_device"`
+
+	// Input correction (Ctrl+R)
+	// CorrectionProfile selects which profile to use for Ctrl+R corrections.
+	// Defaults to "oai-mini" if empty.
+	CorrectionProfile string `json:"correction_profile"`
+	// CorrectionPrompt overrides the built-in system prompt used for corrections.
+	// Leave empty to use the default.
+	CorrectionPrompt string `json:"correction_prompt"`
 }
 
 // Load reads the c2 section from the config file at path.

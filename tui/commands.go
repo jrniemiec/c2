@@ -880,8 +880,8 @@ func cmdDeleteLast(m *Model, args []string) cmdResult {
 		n = v
 	}
 
-	// Single entry: execute immediately, no confirmation needed.
-	if n == 1 {
+	// Single entry: execute immediately unless --ack-all-deletions is set.
+	if n == 1 && !m.ackAllDeletions {
 		if len(m.exchanges) == 0 {
 			return okResult("/delete-last", []string{"nothing to delete"})
 		}
@@ -894,8 +894,14 @@ func cmdDeleteLast(m *Model, args []string) cmdResult {
 		return okResult("/delete-last", []string{fmt.Sprintf("deleted %d exchange(s)", removed)})
 	}
 
-	// Multiple entries: keep confirmation flow.
-	noun := fmt.Sprintf("last %d exchanges", n)
+	// Confirmation flow (multiple entries, or n==1 with --ack-all-deletions).
+	if len(m.exchanges) == 0 {
+		return okResult("/delete-last", []string{"nothing to delete"})
+	}
+	noun := fmt.Sprintf("last %d exchange(s)", n)
+	if n == 1 {
+		noun = "last exchange"
+	}
 	m.pendingAction = func() cmdResult {
 		removed, err := m.eng.DeleteLast(n)
 		if err != nil {

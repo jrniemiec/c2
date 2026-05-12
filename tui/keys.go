@@ -19,6 +19,7 @@ type keyMap struct {
 	FillCompletion key.Binding
 	SwitchMode        key.Binding
 	CopyToClipboard       key.Binding
+	CorrectInput key.Binding // Ctrl+R: send input for spell/grammar correction
 	WakeWord key.Binding // Ctrl+Space: toggle AWAKE state (voice mode only)
 	DEVToggleTranscribing key.Binding // dev-only: simulate transcribing state
 	CloseOverlay key.Binding // Ctrl+X: close any overlay
@@ -84,6 +85,10 @@ var keys = keyMap{
 	CopyToClipboard: key.NewBinding(
 		key.WithKeys("ctrl+s"),
 		key.WithHelp("ctrl+s", "copy to clipboard"),
+	),
+	CorrectInput: key.NewBinding(
+		key.WithKeys("ctrl+r"),
+		key.WithHelp("ctrl+r", "correct spelling/grammar"),
 	),
 	WakeWord: key.NewBinding(
 		key.WithKeys("ctrl+@"),

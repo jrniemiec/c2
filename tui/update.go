@@ -14,10 +14,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jrniemiec/c2/audio"
+	"github.com/jrniemiec/c2/c2config"
 	"github.com/jrniemiec/c2/speech"
 	"github.com/jrniemiec/c2/config"
 	"github.com/jrniemiec/c2/core"
 	"github.com/jrniemiec/c2/engine"
+	"github.com/jrniemiec/c2/provider"
 )
 
 // Update handles all incoming messages.
@@ -336,6 +338,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			next := m.ttsPendingSentences[0]
 			m.ttsPendingSentences = m.ttsPendingSentences[1:]
 			cmds = append(cmds, startTTS(next.text, next.exIdx, &m))
+		} else if len(m.resourceTTSQueue) > 0 && m.focus == paneResource {
+			// Drain resource line-by-line queue.
+			next := m.resourceTTSQueue[0]
+			m.resourceTTSQueue = m.resourceTTSQueue[1:]
+			m.resourceCursor = next
+			m.resourceTTSText = m.resourceLines[next]
+			m.rebuildResourceContent()
+			m.scrollResourceToCursor()
+			cmds = append(cmds, startTTS(ttsStrip(m.resourceTTSText), -1, &m))
 		} else if len(m.ttsQueue) > 0 {
 			// Drain play-all queue.
 			next := m.ttsQueue[0]
@@ -352,6 +363,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setVoiceState(VoiceConversing)
 		}
 		m.rebuildConvContent()
+
+	case correctionDoneMsg:
+		m.correcting = false
+		// Restore voice state that was paused for the correction call.
+		if m.correctionVoiceState != VoiceIdle {
+			m.setVoiceState(m.correctionVoiceState)
+			m.correctionVoiceState = VoiceIdle
+		}
+		if msg.err == nil && msg.text != "" {
+			// Preserve "//" prefix if original input had it.
+			corrected := msg.text
+			if strings.HasPrefix(m.input.Value(), "// ") {
+				corrected = "// " + corrected
+			}
+			if corrected != m.input.Value() {
+				m.correctionFlash = "✓ corrected"
+			} else {
+				m.correctionFlash = "✓ no changes"
+			}
+			m.input.SetValue(corrected)
+			m.input.CursorEnd()
+		} else if msg.err != nil {
+			m.correctionFlash = "✗ correction failed"
+		}
+		cmds = append(cmds, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+			return correctionFlashMsg{}
+		}))
+		m.syncLayout()
+
+	case correctionFlashMsg:
+		m.correctionFlash = ""
 
 	// --- mouse ---
 	case tea.MouseMsg:
@@ -543,6 +585,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.historyIdx = -1
 				m.historySaved = ""
 				m.focusedExIdx = -1
+				m.killTTS()
 				m.setFocus(paneInput)
 				m.input.Focus()
 				m.rebuildConvContent()
@@ -912,6 +955,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.SwitchProfile):
 			m.openProfilePicker()
 
+		case key.Matches(msg, keys.CorrectInput):
+			if !m.correcting && strings.TrimSpace(m.input.Value()) != "" {
+				m.correcting = true
+				// Strip leading "//" note prefix before correcting.
+				text := m.input.Value()
+				if strings.HasPrefix(text, "//") {
+					text = strings.TrimSpace(text[2:])
+					m.input.SetValue("// " + text)
+				}
+				// Pause STT for the duration of the correction call.
+				m.correctionVoiceState = m.voiceState
+				if m.voiceState != VoiceIdle {
+					m.setVoiceState(VoiceIdle)
+				}
+				cmds = append(cmds, doCorrection(text, m.cfg, m.c2cfg))
+			}
+
 		default:
 			// v/d/s: nav mode actions — only when paneConv is focused.
 			if m.focus == paneConv && m.focusedExIdx >= 0 && msg.Type == tea.KeyRunes {
@@ -936,21 +996,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Batch(cmds...)
 				case "x":
 					exIdx := m.focusedExIdx
-					if err := m.eng.DeleteAt(exIdx); err != nil {
-						m.lastCmd = &cmdResult{input: fmt.Sprintf("delete entry #%d", exIdx+1), output: []string{err.Error()}, isError: true}
+					doDelete := func() {
+						if err := m.eng.DeleteAt(exIdx); err != nil {
+							m.lastCmd = &cmdResult{input: fmt.Sprintf("delete entry #%d", exIdx+1), output: []string{err.Error()}, isError: true}
+							m.cmdPaneOpen = true
+						} else {
+							m.exchanges = append(m.exchanges[:exIdx], m.exchanges[exIdx+1:]...)
+							if m.focusedExIdx >= len(m.exchanges) {
+								m.focusedExIdx = len(m.exchanges) - 1
+							}
+							if len(m.exchanges) == 0 {
+								m.focus = paneInput
+								m.focusedExIdx = -1
+								m.input.Focus()
+							}
+							m.rebuildConvContent()
+							m.syncLayout()
+						}
+					}
+					if m.ackAllDeletions {
+						label := fmt.Sprintf("delete entry #%d", exIdx+1)
+						m.deletingExIdx = exIdx
+						m.pendingAction = func() cmdResult {
+							doDelete()
+							m.deletingExIdx = -1
+							return okResult(label, []string{fmt.Sprintf("entry #%d deleted", exIdx+1)})
+						}
+						m.lastCmd = &cmdResult{
+							input:  label,
+							output: []string{fmt.Sprintf("Entry #%d will be permanently deleted.", exIdx+1), "[yes] to confirm, other input or Esc to cancel:"},
+						}
 						m.cmdPaneOpen = true
-					} else {
-						m.exchanges = append(m.exchanges[:exIdx], m.exchanges[exIdx+1:]...)
-						if m.focusedExIdx >= len(m.exchanges) {
-							m.focusedExIdx = len(m.exchanges) - 1
-						}
-						if len(m.exchanges) == 0 {
-							m.focus = paneInput
-							m.focusedExIdx = -1
-							m.input.Focus()
-						}
-						m.rebuildConvContent()
+						m.cmdScroll.SetContent(renderCmdOutput(&m))
+						m.cmdScroll.GotoTop()
+						m.setFocus(paneInput)
+						m.input.Focus()
 						m.syncLayout()
+					} else {
+						doDelete()
 					}
 					return m, tea.Batch(cmds...)
 				}
@@ -1103,6 +1186,53 @@ func (m *Model) sendMessage() tea.Cmd {
 	}
 }
 
+// =============================================================================
+// Input correction (Ctrl+R)
+// =============================================================================
+
+// defaultCorrectionPrompt is used when correction_prompt is not set in config.
+// Edit this constant or set "correction_prompt" in the c2 config section to customise.
+const defaultCorrectionPrompt = "Correct the spelling and grammar of the following text. " +
+	"Return only the corrected text with no explanations, no quotes, and no additional commentary."
+
+// doCorrection sends the input text to the correction profile for spell/grammar fixing.
+// The result is returned as a correctionDoneMsg.
+func doCorrection(text string, cfg config.Config, c2cfg c2config.C2Config) tea.Cmd {
+	return func() tea.Msg {
+		// Resolve which profile to use.
+		profileCode := c2cfg.CorrectionProfile
+		if profileCode == "" {
+			profileCode = "oai-mini"
+		}
+		prof, ok := cfg.Profiles[profileCode]
+		if !ok {
+			return correctionDoneMsg{err: fmt.Errorf("correction profile %q not found in config", profileCode)}
+		}
+
+		// Resolve system prompt.
+		systemPrompt := c2cfg.CorrectionPrompt
+		if systemPrompt == "" {
+			systemPrompt = defaultCorrectionPrompt
+		}
+
+		prov, err := provider.New(prof)
+		if err != nil {
+			return correctionDoneMsg{err: fmt.Errorf("correction: init provider: %w", err)}
+		}
+
+		msgs := []core.Message{
+			{Role: core.RoleUser, Content: text},
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		response, _, err := prov.Chat(ctx, systemPrompt, msgs)
+		if err != nil {
+			return correctionDoneMsg{err: fmt.Errorf("correction: %w", err)}
+		}
+		return correctionDoneMsg{text: strings.TrimSpace(response)}
+	}
+}
+
 // ttsText returns the assistant reply as plain text to speak.
 // Notes speak the note content; regular exchanges speak only the assistant reply.
 func ttsText(ex *exchange) string {
@@ -1206,16 +1336,25 @@ func startTTSAck(text string, m *Model) tea.Cmd {
 }
 
 // startTTSSay uses macOS say(1).
+// A per-call timeout is estimated from text length to guard against say(1) hangs.
 func startTTSSay(text string, gen int, m *Model) tea.Cmd {
 	args := []string{"-r", fmt.Sprintf("%d", m.ttsRate)}
 	if m.c2cfg.TTSVoice != "" {
 		args = append(args, "-v", m.c2cfg.TTSVoice)
 	}
-	cmd := exec.Command("say", args...)
+	// Estimate a generous timeout: assume ~5 chars/word, 3× safety factor, min 15s.
+	words := len([]rune(text))/5 + 1
+	secs := words * 60 / m.ttsRate * 3
+	if secs < 15 {
+		secs = 15
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(secs)*time.Second)
+	cmd := exec.CommandContext(ctx, "say", args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin = strings.NewReader(text)
 	m.ttsCmd = cmd
 	return func() tea.Msg {
+		defer cancel()
 		err := cmd.Run()
 		return ttsDoneMsg{err: err, gen: gen}
 	}
@@ -1401,10 +1540,20 @@ func (m *Model) handleResourceKey(msg tea.KeyMsg) []tea.Cmd {
 			m.resourceTTSText = ""
 			m.rebuildResourceContent()
 		} else {
-			text := ttsStrip(strings.Join(m.resourceLines[m.resourceCursor:], "\n"))
-			if text != "" {
-				m.resourceTTSText = text
-				cmds = append(cmds, startTTS(text, -1, m))
+			// Build queue of non-empty line indices from cursor onward.
+			var queue []int
+			for i := m.resourceCursor; i < len(m.resourceLines); i++ {
+				if ttsStrip(m.resourceLines[i]) != "" {
+					queue = append(queue, i)
+				}
+			}
+			if len(queue) > 0 {
+				m.resourceTTSQueue = queue[1:]
+				m.resourceCursor = queue[0]
+				m.resourceTTSText = m.resourceLines[queue[0]]
+				m.rebuildResourceContent()
+				m.scrollResourceToCursor()
+				cmds = append(cmds, startTTS(ttsStrip(m.resourceTTSText), -1, m))
 			}
 		}
 
@@ -1414,8 +1563,9 @@ func (m *Model) handleResourceKey(msg tea.KeyMsg) []tea.Cmd {
 				m.ttsRate -= 20
 			}
 			text := m.resourceTTSText
-			m.killTTS()
-			cmds = append(cmds, startTTS(text, -1, m))
+			m.resourceTTSQueue = m.resourceTTSQueue // preserve queue
+			killTTSAudio(m)
+			cmds = append(cmds, startTTS(ttsStrip(text), -1, m))
 		}
 
 	case msg.Type == tea.KeyRunes && string(msg.Runes) == "]":
@@ -1424,8 +1574,9 @@ func (m *Model) handleResourceKey(msg tea.KeyMsg) []tea.Cmd {
 				m.ttsRate += 20
 			}
 			text := m.resourceTTSText
-			m.killTTS()
-			cmds = append(cmds, startTTS(text, -1, m))
+			m.resourceTTSQueue = m.resourceTTSQueue // preserve queue
+			killTTSAudio(m)
+			cmds = append(cmds, startTTS(ttsStrip(text), -1, m))
 		}
 
 	case msg.Type == tea.KeyRunes && string(msg.Runes) == "e":

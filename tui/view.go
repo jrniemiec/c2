@@ -854,6 +854,10 @@ func renderStatsLine(m *Model, sep string) string {
 			ttsLabel = fmt.Sprintf("♪ #%d  %d wpm  [ slower  ] faster", m.ttsExIdx+1, m.ttsRate)
 		}
 		left = renderWaveIndicator(m.spinnerFrame, ttsLabel, t.StreamingText, t.Dimmed)
+	} else if m.correcting {
+		left = renderWaveIndicator(m.spinnerFrame, "correcting", t.StreamingText, t.Dimmed)
+	} else if m.correctionFlash != "" {
+		left = fg(t.StreamingText, m.correctionFlash)
 	} else if m.streaming {
 		left = renderWaveIndicator(m.spinnerFrame, "streaming", t.StreamingText, t.Dimmed)
 	} else if m.transcribing {

@@ -28,6 +28,8 @@ const (
 	paneConv
 	paneCmd
 	paneResource
+	paneTopicPicker
+	paneProfilePicker
 )
 
 // interactionMode is the active input mode.
@@ -201,6 +203,20 @@ type Model struct {
 	resourceTTSText  string         // text currently being spoken (for speed-change restart)
 	preFocus         focusPane      // focus state to restore on overlay close
 	preFocusedExIdx  int            // focusedExIdx to restore on overlay close
+
+	// topic picker overlay (active when focus == paneTopicPicker)
+	topicPickerAll    []string
+	topicPickerItems  []string
+	topicPickerFilter string
+	topicPickerIdx    int
+	topicPickerScroll int
+
+	// profile picker overlay (active when focus == paneProfilePicker)
+	profilePickerAll    []string
+	profilePickerItems  []string
+	profilePickerFilter string
+	profilePickerIdx    int
+	profilePickerScroll int
 }
 
 // ttsPendingItem is a sentence queued for sentence-streaming TTS playback.
@@ -460,15 +476,26 @@ func (m *Model) cmdPaneHeight() int {
 
 // syncLayout recalculates the conversation viewport height based on current
 // terminal size and textarea height. Call after resize or textarea height change.
+// pickerOverlayHeight returns the fixed line count used by both pickers.
+// 1 (title) + 1 (sep) + maxVisible (items) + 1 (sep) + 1 (count) + 1 (keys)
+func pickerOverlayHeight() int { return topicPickerMaxVisible + 5 }
+
 func (m *Model) syncLayout() {
 	// Layout (each value = number of terminal lines):
 	//   top bar:    2 (text + separator)
 	//   conv:       convH
-	//   input pane: 1 (separator) + textarea.Height()
-	//   bottom pane: 1 (separator) + cmdPaneHeight()
+	//   input pane: 1 (separator) + textarea.Height()  (hidden when picker open)
+	//   bottom pane: 1 (separator) + cmdPaneHeight()    (hidden when picker open)
+	//   picker:     pickerOverlayHeight()               (only when picker open)
+	pickerOpen := m.focus == paneTopicPicker || m.focus == paneProfilePicker
 	inputH := m.input.Height() + 1
 	bottomH := 1 + m.cmdPaneHeight()
-	convH := m.height - 2 - inputH - bottomH
+	var convH int
+	if pickerOpen {
+		convH = m.height - 2 - pickerOverlayHeight()
+	} else {
+		convH = m.height - 2 - inputH - bottomH
+	}
 	if convH < 3 {
 		convH = 3
 	}
@@ -626,4 +653,124 @@ func (m *Model) closeResourceOverlay() {
 	}
 	m.rebuildConvContent()
 	m.syncLayout()
+}
+
+// openTopicPicker initialises and opens the topic picker overlay.
+func (m *Model) openTopicPicker() {
+	topics, err := m.eng.ListTopics()
+	if err != nil {
+		return
+	}
+	current := m.eng.TopicName()
+	var all []string
+	all = append(all, current)
+	for _, t := range topics {
+		if t != current {
+			all = append(all, t)
+		}
+	}
+	m.topicPickerAll = all
+	m.topicPickerFilter = ""
+	m.topicPickerItems = all
+	m.topicPickerIdx = 0
+	m.topicPickerScroll = 0
+	m.preFocus = m.focus
+	m.preFocusedExIdx = m.focusedExIdx
+	m.setFocus(paneTopicPicker)
+	m.syncLayout()
+	m.rebuildConvContent()
+}
+
+// closeTopicPicker tears down the topic picker and restores previous focus.
+func (m *Model) closeTopicPicker() {
+	m.setFocus(m.preFocus)
+	m.focusedExIdx = m.preFocusedExIdx
+	m.topicPickerAll = nil
+	m.topicPickerItems = nil
+	m.topicPickerFilter = ""
+	m.topicPickerIdx = 0
+	m.topicPickerScroll = 0
+	if m.preFocus == paneInput {
+		m.input.Focus()
+	}
+	m.syncLayout()
+	m.rebuildConvContent()
+}
+
+// filterTopicPicker re-filters topicPickerItems from topicPickerAll using the current filter.
+func (m *Model) filterTopicPicker() {
+	f := strings.ToLower(m.topicPickerFilter)
+	if f == "" {
+		m.topicPickerItems = m.topicPickerAll
+	} else {
+		var out []string
+		for _, t := range m.topicPickerAll {
+			if strings.Contains(strings.ToLower(t), f) {
+				out = append(out, t)
+			}
+		}
+		m.topicPickerItems = out
+	}
+	m.topicPickerIdx = 0
+	m.topicPickerScroll = 0
+}
+
+// openProfilePicker initialises and opens the profile picker overlay.
+func (m *Model) openProfilePicker() {
+	current := m.eng.ProfileCode()
+	names := make([]string, 0, len(m.cfg.Profiles))
+	for name := range m.cfg.Profiles {
+		names = append(names, name)
+	}
+	sortedNames := make([]string, 0, len(names))
+	sortedNames = append(sortedNames, current)
+	for _, n := range names {
+		if n != current {
+			sortedNames = append(sortedNames, n)
+		}
+	}
+	m.profilePickerAll = sortedNames
+	m.profilePickerFilter = ""
+	m.profilePickerItems = sortedNames
+	m.profilePickerIdx = 0
+	m.profilePickerScroll = 0
+	m.preFocus = m.focus
+	m.preFocusedExIdx = m.focusedExIdx
+	m.setFocus(paneProfilePicker)
+	m.syncLayout()
+	m.rebuildConvContent()
+}
+
+// closeProfilePicker tears down the profile picker and restores previous focus.
+func (m *Model) closeProfilePicker() {
+	m.setFocus(m.preFocus)
+	m.focusedExIdx = m.preFocusedExIdx
+	m.profilePickerAll = nil
+	m.profilePickerItems = nil
+	m.profilePickerFilter = ""
+	m.profilePickerIdx = 0
+	m.profilePickerScroll = 0
+	if m.preFocus == paneInput {
+		m.input.Focus()
+	}
+	m.syncLayout()
+	m.rebuildConvContent()
+}
+
+// filterProfilePicker re-filters profilePickerItems from profilePickerAll using the current filter.
+func (m *Model) filterProfilePicker() {
+	f := strings.ToLower(m.profilePickerFilter)
+	if f == "" {
+		m.profilePickerItems = m.profilePickerAll
+	} else {
+		var out []string
+		for _, n := range m.profilePickerAll {
+			if strings.Contains(strings.ToLower(n), f) {
+				out = append(out, n)
+			}
+		}
+		m.profilePickerItems = out
+	}
+	m.profilePickerIdx = 0
+	m.profilePickerScroll = 0
 }

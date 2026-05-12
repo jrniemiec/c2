@@ -25,7 +25,7 @@ var knownCommands = map[string]bool{
 	"topic-delete": true, "topic-clear": true, "topic-default": true,
 	"topic-default-set": true, "topic-summary": true, "topic-history": true,
 	"topic-resource": true,
-	"resource-list": true, "resource-add": true, "resource-remove": true, "resource-delete": true, "resource-view": true, "resource-edit": true,
+	"resource-list": true, "resource-add": true, "resource-new": true, "resource-remove": true, "resource-delete": true, "resource-view": true, "resource-edit": true,
 	"tts": true, "voice-commands": true, "export": true,
 	"profile": true, "profile-switch": true, "profile-list": true,
 	"profile-default": true, "profile-default-set": true,
@@ -86,6 +86,8 @@ func handleCommand(m *Model, input string) cmdResult {
 		return cmdResourceOpen(m, args)
 	case "/resource-edit":
 		return cmdResourceEdit(m, args)
+	case "/resource-new":
+		return cmdResourceNew(m, args)
 
 	// --- profile ---
 	case "/profile":
@@ -495,6 +497,35 @@ func cmdResourceEdit(m *Model, args []string) cmdResult {
 		}),
 	}
 	return res
+}
+
+func cmdResourceNew(m *Model, args []string) cmdResult {
+	if len(args) == 0 {
+		return errResult("/resource-new", "usage: /resource-new <name>")
+	}
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		return errResult("/resource-new", "$EDITOR is not set — add 'export EDITOR=<path>' to your shell config")
+	}
+	name := args[0]
+	filePath := filepath.Join(m.eng.ResourceDir(), name)
+	if _, err := os.Stat(filePath); err == nil {
+		return errResult("/resource-new "+name, fmt.Sprintf("resource %q already exists — use /resource-edit to edit it", name))
+	}
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		return errResult("/resource-new "+name, err.Error())
+	}
+	if err := os.WriteFile(filePath, nil, 0o644); err != nil {
+		return errResult("/resource-new "+name, err.Error())
+	}
+	editorCmd := exec.Command(editor, filePath)
+	return cmdResult{
+		input:           "/resource-new " + name,
+		suppressCmdPane: true,
+		execCmd: tea.ExecProcess(editorCmd, func(err error) tea.Msg {
+			return resourceReloadMsg{name: name}
+		}),
+	}
 }
 
 // =============================================================================
@@ -987,6 +1018,7 @@ func allCompletions() []completionEntry {
 		{"/topic-summary", "show current context summary"},
 		{"/topic-history", "show last N exchanges"},
 		{"/resource-add", "add resource file to current topic"},
+		{"/resource-new", "create a new resource file and open in $EDITOR"},
 		{"/resource-list", "list resources for topic"},
 		{"/resource-remove", "remove a resource from topic"},
 		{"/resource-delete", "delete a resource from topic (alias for remove)"},
@@ -1210,6 +1242,7 @@ func cmdHelp(cmd string, args []string) cmdResult {
 		"resource": {
 			{"/resource-list [topic]", "list resources for topic"},
 			{"/resource-add <file>", "copy file into topic resources"},
+			{"/resource-new <name>", "create a new resource file and open in $EDITOR"},
 			{"/resource-remove <name>", "delete a resource from topic"},
 			{"/resource-delete <name>", "delete a resource from topic (alias for remove)"},
 			{"/resource-view <name>", "open a resource file in the viewer"},

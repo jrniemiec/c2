@@ -21,6 +21,7 @@ type keyMap struct {
 	CopyToClipboard       key.Binding
 	WakeWord key.Binding // Ctrl+Space: toggle AWAKE state (voice mode only)
 	DEVToggleTranscribing key.Binding // dev-only: simulate transcribing state
+	CloseOverlay key.Binding // Ctrl+X: close any overlay
 }
 
 var keys = keyMap{
@@ -91,5 +92,9 @@ var keys = keyMap{
 	DEVToggleTranscribing: key.NewBinding(
 		key.WithKeys("ctrl+y"),
 		key.WithHelp("ctrl+y", "[DEV] toggle transcribing state"),
+	),
+	CloseOverlay: key.NewBinding(
+		key.WithKeys("ctrl+x"),
+		key.WithHelp("ctrl+x", "close overlay"),
 	),
 }

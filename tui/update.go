@@ -373,6 +373,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.handleResourceKey(msg)...)
 			return m, tea.Batch(cmds...)
 		}
+		// Topic picker overlay: handle all keys independently and return early.
+		if m.focus == paneTopicPicker {
+			cmds = append(cmds, m.handleTopicPickerKey(msg)...)
+			return m, tea.Batch(cmds...)
+		}
+		// Profile picker overlay: handle all keys independently and return early.
+		if m.focus == paneProfilePicker {
+			cmds = append(cmds, m.handleProfilePickerKey(msg)...)
+			return m, tea.Batch(cmds...)
+		}
 
 		// Ctrl+Space: keyboard wake word toggle (voice mode only).
 		if m.mode == modeVoice && key.Matches(msg, keys.WakeWord) {
@@ -897,11 +907,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.rebuildConvContent()
 			}
 
-		// Ctrl+T / Ctrl+P: topic/profile switching (stub — popup in future)
 		case key.Matches(msg, keys.SwitchTopic):
-			// TODO: topic picker popup
+			m.openTopicPicker()
 		case key.Matches(msg, keys.SwitchProfile):
-			// TODO: profile picker popup
+			m.openProfilePicker()
 
 		default:
 			// v/d/s: nav mode actions — only when paneConv is focused.
@@ -2064,4 +2073,106 @@ func calcExchangeCost(r engine.ChatResult, eng *engine.Engine) float64 {
 		return 0
 	}
 	return config.CalcCost(r.Usage.InputTokens, r.Usage.OutputTokens, inPer1M, outPer1M)
+}
+
+const topicPickerMaxVisible = 8
+
+// handleTopicPickerKey processes keyboard input when the topic picker overlay is active.
+func (m *Model) handleTopicPickerKey(msg tea.KeyMsg) []tea.Cmd {
+	switch {
+	case key.Matches(msg, keys.Cancel), key.Matches(msg, keys.Dismiss), key.Matches(msg, keys.CloseOverlay):
+		m.closeTopicPicker()
+
+	case key.Matches(msg, keys.SwitchTopic):
+		m.closeTopicPicker()
+
+	case key.Matches(msg, keys.Send):
+		if len(m.topicPickerItems) > 0 {
+			name := m.topicPickerItems[m.topicPickerIdx]
+			m.closeTopicPicker()
+			res := cmdTopicSwitch(m, []string{name})
+			if !res.isError {
+				m.lastCmd = &res
+				m.cmdPaneOpen = false
+			}
+		}
+
+	case key.Matches(msg, keys.NavUp):
+		if m.topicPickerIdx > 0 {
+			m.topicPickerIdx--
+			if m.topicPickerIdx < m.topicPickerScroll {
+				m.topicPickerScroll = m.topicPickerIdx
+			}
+		}
+
+	case key.Matches(msg, keys.NavDown):
+		if m.topicPickerIdx < len(m.topicPickerItems)-1 {
+			m.topicPickerIdx++
+			if m.topicPickerIdx >= m.topicPickerScroll+topicPickerMaxVisible {
+				m.topicPickerScroll = m.topicPickerIdx - topicPickerMaxVisible + 1
+			}
+		}
+
+	case msg.Type == tea.KeyBackspace:
+		if len(m.topicPickerFilter) > 0 {
+			runes := []rune(m.topicPickerFilter)
+			m.topicPickerFilter = string(runes[:len(runes)-1])
+			m.filterTopicPicker()
+		}
+
+	case msg.Type == tea.KeyRunes:
+		m.topicPickerFilter += string(msg.Runes)
+		m.filterTopicPicker()
+	}
+	return nil
+}
+
+// handleProfilePickerKey processes keyboard input when the profile picker overlay is active.
+func (m *Model) handleProfilePickerKey(msg tea.KeyMsg) []tea.Cmd {
+	switch {
+	case key.Matches(msg, keys.Cancel), key.Matches(msg, keys.Dismiss), key.Matches(msg, keys.CloseOverlay):
+		m.closeProfilePicker()
+
+	case key.Matches(msg, keys.SwitchProfile):
+		m.closeProfilePicker()
+
+	case key.Matches(msg, keys.Send):
+		if len(m.profilePickerItems) > 0 {
+			name := m.profilePickerItems[m.profilePickerIdx]
+			m.closeProfilePicker()
+			res := cmdProfileSwitch(m, []string{name})
+			if !res.isError {
+				m.lastCmd = &res
+				m.cmdPaneOpen = false
+			}
+		}
+
+	case key.Matches(msg, keys.NavUp):
+		if m.profilePickerIdx > 0 {
+			m.profilePickerIdx--
+			if m.profilePickerIdx < m.profilePickerScroll {
+				m.profilePickerScroll = m.profilePickerIdx
+			}
+		}
+
+	case key.Matches(msg, keys.NavDown):
+		if m.profilePickerIdx < len(m.profilePickerItems)-1 {
+			m.profilePickerIdx++
+			if m.profilePickerIdx >= m.profilePickerScroll+topicPickerMaxVisible {
+				m.profilePickerScroll = m.profilePickerIdx - topicPickerMaxVisible + 1
+			}
+		}
+
+	case msg.Type == tea.KeyBackspace:
+		if len(m.profilePickerFilter) > 0 {
+			runes := []rune(m.profilePickerFilter)
+			m.profilePickerFilter = string(runes[:len(runes)-1])
+			m.filterProfilePicker()
+		}
+
+	case msg.Type == tea.KeyRunes:
+		m.profilePickerFilter += string(msg.Runes)
+		m.filterProfilePicker()
+	}
+	return nil
 }

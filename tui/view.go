@@ -66,6 +66,20 @@ func (m Model) View() string {
 			renderResourceHintBar(&m),
 		}, "\n")
 	}
+	if m.focus == paneTopicPicker {
+		return strings.Join([]string{
+			renderTopBar(&m),
+			m.conv.View(),
+			renderTopicPicker(&m),
+		}, "\n")
+	}
+	if m.focus == paneProfilePicker {
+		return strings.Join([]string{
+			renderTopBar(&m),
+			m.conv.View(),
+			renderProfilePicker(&m),
+		}, "\n")
+	}
 	return strings.Join([]string{
 		renderTopBar(&m),
 		m.conv.View(),
@@ -895,4 +909,154 @@ func renderStatsLine(m *Model, sep string) string {
 		right +
 		strings.Repeat(" ", pad)
 	return sep + "\n" + statsLine
+}
+
+// renderTopicPicker renders the topic picker overlay.
+func renderTopicPicker(m *Model) string {
+	t := ActiveTheme
+	w := m.width
+
+	title := fg(t.TopBarText, "Switch topic")
+	cursor := ""
+	if m.cursorVisible {
+		cursor = fg(t.InputPrompt, "█")
+	}
+	filterDisplay := fg(t.InputText, m.topicPickerFilter) + cursor
+	titleLine := " " + title + "  " + filterDisplay
+	titleBar := titleLine + strings.Repeat(" ", max(0, w-lipgloss.Width(titleLine)))
+	topSep := fg(t.BoxBorder, strings.Repeat("─", w))
+
+	items := m.topicPickerItems
+	total := len(items)
+	scroll := m.topicPickerScroll
+	end := scroll + topicPickerMaxVisible
+	if end > total {
+		end = total
+	}
+	current := m.eng.TopicName()
+
+	var listLines []string
+	for i, name := range items[scroll:end] {
+		absIdx := scroll + i
+		isCurrent := name == current
+		isSelected := absIdx == m.topicPickerIdx
+		marker := "  "
+		if isSelected {
+			marker = fg(t.InputPrompt, "> ")
+		}
+		var label string
+		if isSelected {
+			color := t.TopBarText
+			if isCurrent {
+				color = t.Spinner
+			}
+			label = lipgloss.NewStyle().Bold(true).Render(fg(color, name))
+		} else if isCurrent {
+			label = fg(t.Spinner, name)
+		} else {
+			label = fg(t.AssistantText, name)
+		}
+		listLines = append(listLines, " "+marker+label)
+	}
+	for len(listLines) < topicPickerMaxVisible {
+		listLines = append(listLines, "")
+	}
+
+	midSep := fg(t.BoxBorder, strings.Repeat("─", w))
+
+	var hintParts []string
+	if scroll > 0 {
+		hintParts = append(hintParts, fmt.Sprintf("↑%d more", scroll))
+	}
+	if end < total {
+		hintParts = append(hintParts, fmt.Sprintf("↓%d more", total-end))
+	}
+	countStr := fmt.Sprintf("%d of %d topics", total, len(m.topicPickerAll))
+	if len(hintParts) > 0 {
+		countStr += "  (" + strings.Join(hintParts, "  ") + ")"
+	}
+
+	var sb strings.Builder
+	sb.WriteString(titleBar + "\n")
+	sb.WriteString(topSep + "\n")
+	sb.WriteString(strings.Join(listLines, "\n") + "\n")
+	sb.WriteString(midSep + "\n")
+	sb.WriteString(" " + fg(t.Dimmed, countStr) + "\n")
+	sb.WriteString(" " + fg(t.Dimmed, "↑↓ navigate  ·  type to filter  ·  Enter switch  ·  Esc / Ctrl+X close"))
+	return sb.String()
+}
+
+// renderProfilePicker renders the profile picker overlay.
+func renderProfilePicker(m *Model) string {
+	t := ActiveTheme
+	w := m.width
+
+	title := fg(t.TopBarText, "Switch profile")
+	cursor := ""
+	if m.cursorVisible {
+		cursor = fg(t.InputPrompt, "█")
+	}
+	filterDisplay := fg(t.InputText, m.profilePickerFilter) + cursor
+	titleLine := " " + title + "  " + filterDisplay
+	titleBar := titleLine + strings.Repeat(" ", max(0, w-lipgloss.Width(titleLine)))
+	topSep := fg(t.BoxBorder, strings.Repeat("─", w))
+
+	items := m.profilePickerItems
+	total := len(items)
+	scroll := m.profilePickerScroll
+	end := scroll + topicPickerMaxVisible
+	if end > total {
+		end = total
+	}
+	current := m.eng.ProfileCode()
+
+	var listLines []string
+	for i, name := range items[scroll:end] {
+		absIdx := scroll + i
+		isCurrent := name == current
+		isSelected := absIdx == m.profilePickerIdx
+		marker := "  "
+		if isSelected {
+			marker = fg(t.InputPrompt, "> ")
+		}
+		var label string
+		if isSelected {
+			color := t.TopBarText
+			if isCurrent {
+				color = t.Spinner
+			}
+			label = lipgloss.NewStyle().Bold(true).Render(fg(color, name))
+		} else if isCurrent {
+			label = fg(t.Spinner, name)
+		} else {
+			label = fg(t.AssistantText, name)
+		}
+		listLines = append(listLines, " "+marker+label)
+	}
+	for len(listLines) < topicPickerMaxVisible {
+		listLines = append(listLines, "")
+	}
+
+	midSep := fg(t.BoxBorder, strings.Repeat("─", w))
+
+	var hintParts []string
+	if scroll > 0 {
+		hintParts = append(hintParts, fmt.Sprintf("↑%d more", scroll))
+	}
+	if end < total {
+		hintParts = append(hintParts, fmt.Sprintf("↓%d more", total-end))
+	}
+	countStr := fmt.Sprintf("%d of %d profiles", total, len(m.profilePickerAll))
+	if len(hintParts) > 0 {
+		countStr += "  (" + strings.Join(hintParts, "  ") + ")"
+	}
+
+	var sb strings.Builder
+	sb.WriteString(titleBar + "\n")
+	sb.WriteString(topSep + "\n")
+	sb.WriteString(strings.Join(listLines, "\n") + "\n")
+	sb.WriteString(midSep + "\n")
+	sb.WriteString(" " + fg(t.Dimmed, countStr) + "\n")
+	sb.WriteString(" " + fg(t.Dimmed, "↑↓ navigate  ·  type to filter  ·  Enter switch  ·  Esc / Ctrl+X close"))
+	return sb.String()
 }

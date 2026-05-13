@@ -128,6 +128,9 @@ var commandSynonyms = map[string][]string{
 	"resource_view":   {"view resource", "open resource", "show resource", "resource view"},
 	"resource_edit":   {"edit resource", "resource edit"},
 	"export":          {"export", "save conversation", "export conversation"},
+	"correct_input":   {"correct that", "fix that", "grammar check", "fix grammar", "correct note", "fix note"},
+	"copy_input":      {"copy input", "copy prompt"},
+	"open_log":        {"show log", "open log", "debug log", "view log", "close log", "hide log"},
 }
 
 // fillerWords are stripped from the transcript before matching.

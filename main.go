@@ -29,7 +29,8 @@ var (
 	flagChatLabels       bool
 	flagFoldLines        int
 	flagFoldOnStart      bool
-	flagAckAllDeletions  bool
+	flagAckAllDeletions    bool
+	flagSpeakCorrectedNote bool
 
 	// core
 	flagProfile string
@@ -94,6 +95,7 @@ func init() {
 	flag.IntVar(&flagFoldLines, "fold-lines", 20, "lines threshold before folding entries (0 = never fold)")
 	flag.BoolVar(&flagFoldOnStart, "fold-on-start", false, "start with all long entries folded")
 	flag.BoolVar(&flagAckAllDeletions, "ack-all-deletions", false, "require confirmation for all deletions, including single entries")
+	flag.BoolVar(&flagSpeakCorrectedNote, "speak-corrected-note", true, "speak corrected text after Ctrl+G or voice 'correct that' command")
 
 	// core
 	flag.StringVar(&flagProfile, "profile", "", "provider profile code")
@@ -295,7 +297,7 @@ func run() int {
 			return 1
 		}
 	}
-	if err := tui.Start(e, cfg, dataDir, c2cfg, flagTheme, chatLabels, foldLines, foldOnStart, flagAckAllDeletions, flagTextMode); err != nil {
+	if err := tui.Start(e, cfg, dataDir, c2cfg, flagTheme, chatLabels, foldLines, foldOnStart, flagAckAllDeletions, flagSpeakCorrectedNote, flagTextMode); err != nil {
 		fmt.Fprintf(os.Stderr, "tui: %v\n", err)
 		return 1
 	}

@@ -87,8 +87,8 @@ var keys = keyMap{
 		key.WithHelp("ctrl+s", "copy to clipboard"),
 	),
 	CorrectInput: key.NewBinding(
-		key.WithKeys("ctrl+r"),
-		key.WithHelp("ctrl+r", "correct spelling/grammar"),
+		key.WithKeys("ctrl+g"),
+		key.WithHelp("ctrl+g", "correct spelling/grammar"),
 	),
 	WakeWord: key.NewBinding(
 		key.WithKeys("ctrl+@"),

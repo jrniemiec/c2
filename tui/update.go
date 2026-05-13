@@ -260,8 +260,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case VoiceDictating, VoiceConversing:
 			if msg.text != "" {
 				// Check for clear_input command mid-dictation.
+				noteMode := m.pendingDictCmd == "note"
 				if label := matchVoiceCommand(msg.text); label == "clear_input" {
-					m.input.SetValue("")
+					if noteMode {
+						m.input.SetValue("// ")
+					} else {
+						m.input.SetValue("")
+					}
 					m.input.CursorEnd()
 					m.syncLayout()
 					go playBeep(beepDictStart)
@@ -271,6 +276,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Append segment to whatever is already in the input — the user
 				// sees transcription building up. Submission happens on "over".
 				existing := strings.TrimSpace(m.input.Value())
+				// Strip "//" prefix in note mode before computing combined text.
+				if noteMode && strings.HasPrefix(existing, "//") {
+					existing = strings.TrimSpace(existing[2:])
+				}
 				segment := strings.TrimRight(strings.TrimSpace(msg.text), ".!?,;:")
 
 				// Detect "over" at end of segment — submission trigger.
@@ -285,11 +294,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 				if segment != "" {
+					var newVal string
 					if existing != "" {
-						m.input.SetValue(existing + " " + segment)
+						newVal = existing + " " + segment
 					} else {
-						m.input.SetValue(segment)
+						newVal = segment
 					}
+					if noteMode {
+						newVal = "// " + newVal
+					}
+					m.input.SetValue(newVal)
 					m.input.CursorEnd()
 					m.syncLayout()
 				}
@@ -354,6 +368,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if next < len(m.exchanges) {
 				cmds = append(cmds, startTTS(ttsText(&m.exchanges[next]), next, &m))
 			}
+		} else if m.correctionTTSPending {
+			// Correction speech done — restore voice state now.
+			m.correctionTTSPending = false
+			if m.correctionVoiceState != VoiceIdle {
+				m.setVoiceState(m.correctionVoiceState)
+				m.correctionVoiceState = VoiceIdle
+			}
 		} else if m.voiceSession && m.voiceState == VoiceExecuting && !m.streaming {
 			// All TTS drained and stream complete — return to listening in a continuous session.
 			if m.executingTimer != nil {
@@ -366,26 +387,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case correctionDoneMsg:
 		m.correcting = false
-		// Restore voice state that was paused for the correction call.
-		if m.correctionVoiceState != VoiceIdle {
-			m.setVoiceState(m.correctionVoiceState)
-			m.correctionVoiceState = VoiceIdle
-		}
 		if msg.err == nil && msg.text != "" {
 			// Preserve "//" prefix if original input had it.
 			corrected := msg.text
 			if strings.HasPrefix(m.input.Value(), "// ") {
 				corrected = "// " + corrected
 			}
-			if corrected != m.input.Value() {
+			textChanged := corrected != m.input.Value()
+			if textChanged {
 				m.correctionFlash = "✓ corrected"
 			} else {
 				m.correctionFlash = "✓ no changes"
 			}
 			m.input.SetValue(corrected)
 			m.input.CursorEnd()
-		} else if msg.err != nil {
-			m.correctionFlash = "✗ correction failed"
+			if m.speakCorrectedNote && textChanged {
+				// Speak result; restore voice state only after TTS finishes.
+				m.correctionTTSPending = true
+				cmds = append(cmds, startTTS("After correction: "+msg.text, -1, &m))
+			} else {
+				// Restore voice state immediately.
+				if m.correctionVoiceState != VoiceIdle {
+					m.setVoiceState(m.correctionVoiceState)
+					m.correctionVoiceState = VoiceIdle
+				}
+			}
+		} else {
+			// Error — always restore immediately.
+			if m.correctionVoiceState != VoiceIdle {
+				m.setVoiceState(m.correctionVoiceState)
+				m.correctionVoiceState = VoiceIdle
+			}
+			if msg.err != nil {
+				m.correctionFlash = "✗ correction failed"
+			}
 		}
 		cmds = append(cmds, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
 			return correctionFlashMsg{}
@@ -599,8 +634,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Tab: fill selected completion into input, or switch voice/text mode
 		case key.Matches(msg, keys.FillCompletion):
 			if len(m.paramItems) > 0 && m.paramIdx >= 0 {
-				// Fill selected parameter value into the input.
-				cmd := strings.TrimSpace(m.input.Value())
+				// Fill selected parameter value into the input, replacing any partial arg.
+				val := m.input.Value()
+				cmd := val
+				if idx := strings.Index(val, " "); idx >= 0 {
+					cmd = val[:idx]
+				}
 				m.input.SetValue(cmd + " " + m.paramItems[m.paramIdx])
 				m.input.CursorEnd()
 				m.paramItems = nil
@@ -629,7 +668,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Send):
 			if len(m.paramItems) > 0 && m.paramIdx >= 0 {
 				// Fill selected parameter value into the input — don't execute yet.
-				cmd := strings.TrimSpace(m.input.Value())
+				val := m.input.Value()
+				cmd := val
+				if idx := strings.Index(val, " "); idx >= 0 {
+					cmd = val[:idx]
+				}
 				m.input.SetValue(cmd + " " + m.paramItems[m.paramIdx])
 				m.input.CursorEnd()
 				m.paramItems = nil
@@ -914,6 +957,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else {
 				text = m.input.Value()
+				if m.pendingDictCmd == "note" {
+					text = strings.TrimSpace(strings.TrimPrefix(text, "//"))
+				}
 			}
 			if text != "" {
 				cmd := exec.Command("pbcopy")
@@ -1075,10 +1121,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else {
 						m.completionIdx = -1
 					}
-				} else if strings.HasPrefix(val, "/") && strings.HasSuffix(val, " ") {
-					// "/cmd " with trailing space and no argument yet — show param picker.
-					cmd := strings.ToLower(strings.TrimSpace(val))
-					items := contextualParams(&m, cmd)
+				} else if strings.HasPrefix(val, "/") && strings.Contains(val, " ") {
+					// "/cmd " or "/cmd <partial>" — show param picker, filtered by partial arg.
+					fields := strings.SplitN(val, " ", 2)
+					cmd := strings.ToLower(fields[0])
+					partial := ""
+					if len(fields) == 2 {
+						partial = strings.ToLower(strings.TrimLeft(fields[1], " "))
+					}
+					allItems := contextualParams(&m, cmd)
+					var items []string
+					for _, item := range allItems {
+						if partial == "" || strings.HasPrefix(strings.ToLower(item), partial) {
+							items = append(items, item)
+						}
+					}
 					m.paramItems = items
 					if len(items) > 0 {
 						m.paramIdx = 0
@@ -1743,7 +1800,11 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		go playAck()
 
 	case "clear_input":
-		m.input.SetValue("")
+		if m.voiceReturnState == VoiceDictating && m.pendingDictCmd == "note" {
+			m.input.SetValue("// ")
+		} else {
+			m.input.SetValue("")
+		}
 		m.input.CursorEnd()
 		m.syncLayout()
 		m.setVoiceState(m.voiceReturnState)
@@ -1763,7 +1824,7 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 
 	case "chat_note":
 		m.pendingDictCmd = "note"
-		m.input.SetValue("")
+		m.input.SetValue("// ")
 		m.setVoiceState(VoiceDictating)
 		// go playBeep(beepDictStart) — replaced by spoken "Dictating"
 		cmds = append(cmds, startTTSAck("Dictating", m))
@@ -1968,6 +2029,44 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 
 	case "export":
 		m.prefillVoiceCmd("/export")
+
+	case "open_log":
+		m.submitVoiceSlashCmd("/log")
+		m.setVoiceState(VoiceIdle)
+		go playAck()
+
+	case "copy_input":
+		text := m.input.Value()
+		if m.pendingDictCmd == "note" {
+			text = strings.TrimSpace(strings.TrimPrefix(text, "//"))
+		}
+		if text != "" {
+			cmd := exec.Command("pbcopy")
+			cmd.Stdin = strings.NewReader(text)
+			_ = cmd.Run()
+			cmds = append(cmds, startTTS("Copied", -1, m))
+		} else {
+			go playBeep(beepUnrecognized)
+		}
+		m.setVoiceState(m.voiceReturnState)
+
+	case "correct_input":
+		text := strings.TrimSpace(m.input.Value())
+		if m.correcting || text == "" {
+			m.setVoiceState(m.voiceReturnState)
+			go playBeep(beepUnrecognized)
+			break
+		}
+		// Strip "//" note prefix before correcting.
+		if strings.HasPrefix(text, "//") {
+			text = strings.TrimSpace(text[2:])
+			m.input.SetValue("// " + text)
+		}
+		m.correctionVoiceState = m.voiceReturnState
+		m.setVoiceState(VoiceIdle)
+		m.correcting = true
+		go playAck()
+		cmds = append(cmds, doCorrection(text, m.cfg, m.c2cfg))
 
 	default:
 		// Unrecognised label — return to previous state.

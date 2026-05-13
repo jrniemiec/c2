@@ -32,6 +32,7 @@ var knownCommands = map[string]bool{
 	"system": true, "system-set": true, "system-clear": true,
 	"config": true, "status": true, "stats": true,
 	"theme": true, "block-keys": true,
+	"log": true,
 }
 
 // looksLikeCommand returns true if the input (no leading /) has ≤ 2 words and
@@ -142,6 +143,8 @@ func handleCommand(m *Model, input string) cmdResult {
 		return cmdVoiceCommands()
 	case "/export":
 		return cmdExport(m, args)
+	case "/log":
+		return cmdLog(m)
 	case "/help":
 		return cmdHelp("/help", args)
 
@@ -1042,8 +1045,9 @@ func allCompletions() []completionEntry {
 		{"/status", "show effective defaults"},
 		{"/stats", "show usage and cost stats"},
 		{"/voice-commands", "list all voice commands and their spoken phrases"},
+		{"/log", "open/close debug log tail in a new terminal window"},
 		{"/export", "export conversation to file"},
-		{"/help", "show all commands or commands for a group"},
+		{"/help [group]", "show all commands or commands for a group (topic|resource|profile|system|info|notes|nav|theme|keys|files)"},
 		{"/delete-last", "delete last N exchanges from history"},
 		{"/tts [on|off]", "toggle TTS auto-mode"},
 		{"/fold", "collapse all long entries"},
@@ -1089,6 +1093,9 @@ func contextualParams(m *Model, cmd string) []string {
 	case "/export":
 		defaultName := fmt.Sprintf("export-%s-%s.md", m.eng.TopicName(), time.Now().Format("2006-01-02"))
 		return []string{defaultName}
+
+	case "/help":
+		return []string{"topic", "resource", "profile", "system", "info", "notes", "nav", "theme", "keys", "files", "all"}
 	}
 	return nil
 }
@@ -1102,6 +1109,58 @@ func filterCompletions(prefix string) []completionEntry {
 		}
 	}
 	return out
+}
+
+// =============================================================================
+// log
+// =============================================================================
+
+func cmdLog(m *Model) cmdResult {
+	pid := os.Getpid()
+	sentinelPath := fmt.Sprintf("%s/c2-log-stop-%d", os.TempDir(), pid)
+
+	// Toggle: if already open, write sentinel to signal the script to exit.
+	if m.logViewerOpen {
+		_ = os.WriteFile(sentinelPath, nil, 0o644)
+		m.logViewerOpen = false
+		return cmdResult{
+			input:  "/log",
+			output: []string{"debug log viewer closed"},
+		}
+	}
+
+	logPath := os.ExpandEnv("$HOME/.c2/debug.log")
+	scriptPath := fmt.Sprintf("%s/c2-log-viewer-%d.sh", os.TempDir(), pid)
+
+	// Script: tail the log, exit when c2 exits OR sentinel file appears; self-deletes on exit.
+	script := fmt.Sprintf(
+		"#!/bin/bash\ntrap 'rm -f \"%s\" \"%s\"' EXIT\ntail -f '%s' & __t=$!\nwhile kill -0 %d 2>/dev/null && [ ! -f '%s' ]; do sleep 1; done\nkill $__t 2>/dev/null\n",
+		scriptPath, sentinelPath, logPath, pid, sentinelPath,
+	)
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		return errResult("/log", fmt.Sprintf("could not write log script: %v", err))
+	}
+
+	var appleScript string
+	switch ActiveTerminal {
+	case TermITerm2:
+		appleScript = fmt.Sprintf(
+			`tell application "iTerm2" to create window with default profile command "%s"`,
+			scriptPath,
+		)
+	default:
+		appleScript = fmt.Sprintf(
+			`tell application "Terminal" to do script "%s"`,
+			scriptPath,
+		)
+	}
+	go exec.Command("osascript", "-e", appleScript).Run()
+	m.logViewerOpen = true
+
+	return cmdResult{
+		input:  "/log",
+		output: []string{"debug log opened in new window — /log again to close"},
+	}
 }
 
 // =============================================================================
@@ -1312,16 +1371,56 @@ func cmdHelp(cmd string, args []string) cmdResult {
 		"    summarize @notes.txt and cross-check with @~/docs/spec.md",
 	}
 
-	order := []string{"topic", "resource", "profile", "system", "info", "notes", "nav", "theme", "files"}
+	order := []string{"topic", "resource", "profile", "system", "info", "notes", "nav", "theme", "keys", "files"}
 
 	noun := ""
 	if len(args) > 0 {
 		noun = strings.ToLower(args[0])
 	}
 
+	keysSection := []string{
+		"keys:",
+		"  global:",
+		fmt.Sprintf("  %-14s  %s", "Enter", "send prompt"),
+		fmt.Sprintf("  %-14s  %s", "Ctrl+J", "insert newline"),
+		fmt.Sprintf("  %-14s  %s", "Ctrl+G", "correct spelling/grammar (replaced in-place)"),
+		fmt.Sprintf("  %-14s  %s", "Tab", "fill completion / toggle voice↔text mode"),
+		fmt.Sprintf("  %-14s  %s", "Esc", "close pane / clear input / kill TTS / back to input"),
+		fmt.Sprintf("  %-14s  %s", "Ctrl+C", "cancel streaming / quit"),
+		fmt.Sprintf("  %-14s  %s", "Ctrl+L", "clear screen"),
+		fmt.Sprintf("  %-14s  %s", "Ctrl+T", "switch topic (picker overlay)"),
+		fmt.Sprintf("  %-14s  %s", "Ctrl+P", "switch profile (picker overlay)"),
+		fmt.Sprintf("  %-14s  %s", "Ctrl+N", "toggle focus: input ↔ conversation"),
+		fmt.Sprintf("  %-14s  %s", "Ctrl+S", "copy focused exchange or input to clipboard"),
+		fmt.Sprintf("  %-14s  %s", "Ctrl+X", "close any overlay"),
+		fmt.Sprintf("  %-14s  %s", "Ctrl+Space", "activate/cancel voice command (voice mode)"),
+		"",
+		"  conversation pane (Tab to enter, ↑↓ to navigate):",
+		fmt.Sprintf("  %-14s  %s", "↑ / ↓", "navigate exchanges"),
+		fmt.Sprintf("  %-14s  %s", "PgUp / PgDn", "scroll content"),
+		fmt.Sprintf("  %-14s  %s", "v", "fold/unfold current entry"),
+		fmt.Sprintf("  %-14s  %s", "s", "speak current entry (TTS)"),
+		fmt.Sprintf("  %-14s  %s", "x", "delete current entry (with confirmation)"),
+		"",
+		"  TTS playback:",
+		fmt.Sprintf("  %-14s  %s", "[  /  ]", "decrease / increase speed"),
+		fmt.Sprintf("  %-14s  %s", "s", "stop playback"),
+		"",
+		"  resource viewer (Ctrl+X or q to close):",
+		fmt.Sprintf("  %-14s  %s", "↑ / ↓", "move cursor line by line"),
+		fmt.Sprintf("  %-14s  %s", "PgUp / PgDn", "move cursor by page"),
+		fmt.Sprintf("  %-14s  %s", "g / G", "jump to top / bottom"),
+		fmt.Sprintf("  %-14s  %s", "s", "start/stop TTS from cursor (line-by-line)"),
+		fmt.Sprintf("  %-14s  %s", "e", "open in $EDITOR"),
+		fmt.Sprintf("  %-14s  %s", "[  /  ]", "decrease / increase TTS speed"),
+	}
+
 	renderGroup := func(g string) []string {
 		if g == "files" {
 			return filesSection
+		}
+		if g == "keys" {
+			return keysSection
 		}
 		entries := groups[g]
 		out := []string{g + ":"}
@@ -1339,7 +1438,7 @@ func cmdHelp(cmd string, args []string) cmdResult {
 			}
 			lines = append(lines, renderGroup(g)...)
 		}
-	} else if noun == "files" || noun == "nav" || noun == "theme" || groups[noun] != nil {
+	} else if noun == "files" || noun == "nav" || noun == "theme" || noun == "keys" || groups[noun] != nil {
 		lines = renderGroup(noun)
 	} else {
 		return errResult(cmd+" "+noun, fmt.Sprintf("unknown group %q — available: %s", noun, strings.Join(order, "|")))

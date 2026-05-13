@@ -158,6 +158,13 @@ type Model struct {
 	// deletion behaviour
 	ackAllDeletions bool // when true, all deletions require confirmation (--ack-all-deletions)
 
+	// log viewer
+	logViewerOpen bool // true while the external log tail window is open
+
+	// voice correction
+	speakCorrectedNote   bool // when true, speak "After correction: <text>" via TTS after Ctrl+G
+	correctionTTSPending bool // true while waiting for correction TTS to finish before restoring voice state
+
 	// c2 interaction mode
 	mode         interactionMode
 	transcribing bool // true while VAD/STT is processing speech

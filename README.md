@@ -79,7 +79,10 @@ The config file contains LLM profile settings and a `"c2"` section for voice/aud
     "kws_keywords":  "/path/to/c2_keywords.txt",
     "kws_gain":      1.0,
 
-    "input_device":  ""
+    "input_device":  "",
+
+    "correction_profile": "oai-mini",
+    "correction_prompt":  ""
   }
 }
 ```
@@ -97,6 +100,8 @@ The config file contains LLM profile settings and a `"c2"` section for voice/aud
 | `kws_keywords` | File listing wake words, one per line prefixed with `@label` |
 | `kws_gain` | Amplitude boost applied to KWS input only (0 = disabled) |
 | `input_device` | Microphone device name (empty = system default) |
+| `correction_profile` | Profile used for Ctrl+R input correction (default: `"oai-mini"`) |
+| `correction_prompt` | System prompt for Ctrl+R correction (empty = built-in default) |
 
 Voice is enabled automatically when `vad_model`, `stt_encoder`, and `stt_decoder` are set. KWS (wake word) is optional; without it voice is activated manually with Tab.
 
@@ -119,6 +124,7 @@ c2 [flags]
 | `--theme <auto\|light\|dark>` | | Color theme (default: auto) |
 | `--fold-lines <N>` | | Fold entries longer than N lines (default: 20, 0=never) |
 | `--fold-on-start` | | Start with all long entries folded |
+| `--ack-all-deletions` | | Require confirmation for all deletions, including single entries |
 | `--chat-labels` | | Prefix turns with [you]/[profile] (default: true) |
 | `--no-tui` / `-nw` | | Headless/CLI mode |
 | `--tts` | | Speak response in CLI mode |
@@ -171,7 +177,8 @@ The **status bar** is context-sensitive:
 - **Command output:** scrollable results pane
 - **Streaming:** `❄ streaming ●●●`
 - **Transcribing:** `❄ transcribing ●●●`
-- **TTS playing:** `♪ #3  1.2x  [ slower ] faster`
+- **Correcting:** `❄ correcting ●●●` (Ctrl+R in flight), then `✓ corrected` / `✓ no changes` for 2s
+- **TTS playing:** `❄ ♪ #3  200 wpm  [ slower ] faster`
 
 ---
 
@@ -183,14 +190,16 @@ The **status bar** is context-sensitive:
 |---|---|
 | `Enter` | Send prompt |
 | `Ctrl+J` | Insert newline (multi-line input) |
+| `Ctrl+G` | Send input for spell/grammar correction (replaced in-place) |
 | `Tab` | Fill completion (input) / toggle voice/text mode |
-| `Esc` | Close pane / clear input / return to input |
+| `Esc` | Close pane / clear input / kill TTS / return to input |
 | `Ctrl+C` | Cancel streaming / quit |
 | `Ctrl+L` | Clear screen |
-| `Ctrl+T` | Switch topic (completion list) |
-| `Ctrl+P` | Switch profile (completion list) |
+| `Ctrl+T` | Switch topic (picker overlay) |
+| `Ctrl+P` | Switch profile (picker overlay) |
 | `Ctrl+N` | Toggle focus: input ↔ conversation |
-| `Ctrl+S` | Copy current entry to clipboard |
+| `Ctrl+S` | Copy focused exchange or input to clipboard |
+| `Ctrl+X` | Close any overlay |
 
 ### Conversation pane (when focused)
 
@@ -198,8 +207,9 @@ The **status bar** is context-sensitive:
 |---|---|
 | `↑` / `↓` | Navigate exchanges |
 | `PgUp` / `PgDn` | Scroll content |
-| `f` | Fold/unfold current entry |
+| `v` | Fold/unfold current entry |
 | `s` | Speak current entry (TTS) |
+| `x` | Delete current entry (with confirmation) |
 
 ### TTS playback
 
@@ -207,7 +217,7 @@ The **status bar** is context-sensitive:
 |---|---|
 | `[` | Decrease speed |
 | `]` | Increase speed |
-| `Space` / `s` | Stop playback |
+| `s` | Stop playback |
 
 ### Resource viewer overlay
 
@@ -217,9 +227,9 @@ The **status bar** is context-sensitive:
 | `PgUp` / `PgDn` | Move cursor by half page |
 | `g` | Jump to top |
 | `G` | Jump to bottom |
-| `s` | Start TTS from cursor position (or stop if playing) |
+| `s` | Start TTS from cursor (line-by-line, cursor follows); stop if playing |
 | `e` | Open in `$EDITOR` |
-| `[` / `]` | Decrease / increase TTS speed |
+| `[` / `]` | Decrease / increase TTS speed (restarts current line) |
 | `Ctrl+X` / `q` | Close overlay |
 
 ---
@@ -248,6 +258,7 @@ Type `/` in the input pane to bring up completions.
 | Command | Description |
 |---|---|
 | `/resource-add <file>` | Copy file to topic resources |
+| `/resource-new <name>` | Create new resource file and open in `$EDITOR` |
 | `/resource-list [topic]` | List topic resources |
 | `/resource-view <name>` | Open resource in full-screen overlay |
 | `/resource-edit <name>` | Edit resource in `$EDITOR` |

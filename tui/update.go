@@ -419,7 +419,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.correctionVoiceState = VoiceIdle
 			}
 			if msg.err != nil {
-				m.correctionFlash = "✗ correction failed"
+				dbg("correction error: %v", msg.err)
+				errStr := msg.err.Error()
+				if len(errStr) > 40 {
+					errStr = errStr[:40] + "…"
+				}
+				m.correctionFlash = "✗ " + errStr
 			}
 		}
 		cmds = append(cmds, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
@@ -1262,6 +1267,11 @@ func doCorrection(text string, cfg config.Config, c2cfg c2config.C2Config) tea.C
 			profileCode = "oai-mini"
 		}
 		prof, ok := cfg.Profiles[profileCode]
+		if !ok && profileCode != cfg.DefaultProfile {
+			// Fall back to the default profile before giving up.
+			profileCode = cfg.DefaultProfile
+			prof, ok = cfg.Profiles[profileCode]
+		}
 		if !ok {
 			return correctionDoneMsg{err: fmt.Errorf("correction profile %q not found in config", profileCode)}
 		}

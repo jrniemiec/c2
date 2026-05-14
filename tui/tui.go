@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -18,7 +19,7 @@ import (
 var debugLog *log.Logger
 
 func init() {
-	f, err := os.OpenFile(os.ExpandEnv("$HOME/.c2/debug.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	f, err := os.OpenFile(os.ExpandEnv("$HOME/.c2/debug.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_APPEND, 0644)
 	if err == nil {
 		debugLog = log.New(f, "", log.Ltime|log.Lmicroseconds)
 	}
@@ -50,6 +51,14 @@ func Start(eng *engine.Engine, cfg config.Config, dataDir string, c2cfg c2config
 
 	activeC2Cfg = c2cfg
 
+	// Log the full resolved config at startup for diagnostics.
+	if b, err := json.MarshalIndent(cfg, "", "  "); err == nil {
+		dbg("startup config:\n%s", b)
+	}
+	if b, err := json.MarshalIndent(c2cfg, "", "  "); err == nil {
+		dbg("startup c2config:\n%s", b)
+	}
+
 	m := New(eng, cfg, dataDir)
 	m.themeMode = theme
 	m.chatLabels = chatLabels
@@ -58,6 +67,19 @@ func Start(eng *engine.Engine, cfg config.Config, dataDir string, c2cfg c2config
 	m.ackAllDeletions = ackAllDeletions
 	m.speakCorrectedNote = speakCorrectedNote
 	m.c2cfg = c2cfg
+
+	// Validate correction profile at startup so misconfiguration is caught early.
+	corrProfile := c2cfg.CorrectionProfile
+	if corrProfile == "" {
+		corrProfile = "oai-mini"
+	}
+	if _, ok := cfg.Profiles[corrProfile]; !ok {
+		if _, ok2 := cfg.Profiles[cfg.DefaultProfile]; ok2 {
+			dbg("warning: correction_profile %q not found — falling back to default profile %q", corrProfile, cfg.DefaultProfile)
+		} else {
+			dbg("warning: correction_profile %q not found in config — Ctrl+G correction will fail", corrProfile)
+		}
+	}
 
 	// Initialise voice pipeline if models are configured and not in text-only mode.
 	voiceDone := make(chan struct{})
@@ -189,6 +211,7 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 		send(voicePipelineErrMsg{fmt.Errorf("audio init: %w", err)})
 		return
 	}
+	cap.LogFunc = dbg
 
 	audioCh := make(chan []float32, 32)
 	capErrCh := make(chan error, 1)

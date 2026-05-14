@@ -1,9 +1,138 @@
 {
   "topics_root": "",
   "default_topic": "default",
-  "default_profile": "gpt-4o-mini",
-  "window_messages": 32,
+  "default_profile": "oai-mini",
+  "window_messages": 1024,
+  "c2": {
+    "tts_backend": "say",
+    "tts_voice": "",
+    "tts_speed": 200,
+    "vad_model": "~/.c2/models/silero_vad.onnx",
+    "stt_encoder": "~/.c2/models/sherpa-onnx-whisper-tiny.en/tiny.en-encoder.int8.onnx",
+    "stt_decoder": "~/.c2/models/sherpa-onnx-whisper-tiny.en/tiny.en-decoder.int8.onnx",
+    "stt_tokens": "~/.c2/models/sherpa-onnx-whisper-tiny.en/tiny.en-tokens.txt",
+    "stt_language": "en",
+    "kws_encoder": "~/.c2/models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+    "kws_decoder": "~/.c2/models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+    "kws_joiner": "~/.c2/models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+    "kws_tokens": "~/.c2/models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/tokens.txt",
+    "kws_keywords": "~/.c2/models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/c2_keywords.txt",
+    "kws_gain": 1.5,
+    "correction_profile": "oai-mini"
+  },
   "profiles": {
+    "oai-mini": {
+      "provider": "openai",
+      "model": "gpt-4o-mini",
+      "max_context_tokens": 128000,
+      "context_token_limit": 16000,
+      "max_user_messages": 32,
+      "strategy": "summarize",
+      "summarizer_profile": "oai-4.1",
+      "color": "green",
+      "info": {
+        "cost_tier": "very_low",
+        "cost_vs_value": "Best for bulk summarization, simple transforms, and cheap pipelines. Lowest cost, but weaker for deep code reasoning, large refactors, and tricky debugging.",
+        "pricing_usd_per_1m_tokens": {
+          "cached_input": 0.075,
+          "input": 0.15,
+          "output": 0.6
+        },
+        "relative_to_oai_mini": "1.0x baseline"
+      }
+    },
+    "oai-4.1": {
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "max_context_tokens": 1048576,
+      "context_token_limit": 48000,
+      "max_user_messages": 32,
+      "strategy": "summarize",
+      "summarizer_profile": "oai-4.1",
+      "color": "yellow",
+      "info": {
+        "cost_tier": "high",
+        "cost_vs_value": "Excellent coding sweet spot. Strong for code analysis, generation, documentation, tests, and non-trivial refactors. Often the best cost-per-successful-result model for serious development.",
+        "pricing_usd_per_1m_tokens": {
+          "cached_input": 0.5,
+          "input": 2,
+          "output": 8
+        },
+        "relative_to_oai_mini": {
+          "input": "13.3x",
+          "output": "13.3x"
+        }
+      }
+    },
+    "oai-4o": {
+      "provider": "openai",
+      "model": "gpt-4o",
+      "max_context_tokens": 128000,
+      "context_token_limit": 32000,
+      "max_user_messages": 32,
+      "strategy": "summarize",
+      "summarizer_profile": "oai-4.1",
+      "color": "blue",
+      "info": {
+        "cost_tier": "medium",
+        "cost_vs_value": "Balanced choice for everyday coding, docs, and refactors. Much better than mini, but not the best value if correctness and deep reasoning matter.",
+        "pricing_usd_per_1m_tokens": {
+          "cached_input": 1.25,
+          "input": 2.5,
+          "output": 10
+        },
+        "relative_to_oai_mini": {
+          "input": "16.7x",
+          "output": "16.7x"
+        }
+      }
+    },
+    "oai-5": {
+      "provider": "openai",
+      "model": "gpt-5",
+      "max_context_tokens": 400000,
+      "context_token_limit": 16000,
+      "max_user_messages": 32,
+      "strategy": "summarize",
+      "summarizer_profile": "oai-4.1",
+      "color": "red",
+      "info": {
+        "cost_tier": "premium",
+        "cost_vs_value": "Use for the hardest work: repo-scale reasoning, architecture, subtle bugs, and high-correctness tasks. Best quality, but higher output cost means diminishing returns on routine tasks.",
+        "pricing_usd_per_1m_tokens": {
+          "cached_input": 0.125,
+          "input": 1.25,
+          "output": 10
+        },
+        "relative_to_oai_mini": {
+          "input": "8.3x",
+          "output": "16.7x"
+        }
+      }
+    },
+    "oai-5-mini": {
+      "provider": "openai",
+      "model": "gpt-5-mini",
+      "max_context_tokens": 200000,
+      "context_token_limit": 32000,
+      "max_user_messages": 32,
+      "strategy": "summarize",
+      "summarizer_profile": "oai-4.1",
+      "color": "red",
+      "info": {
+        "cost_tier": "low_to_medium",
+        "cost_vs_value": "Very attractive middle tier. Much stronger than 4o-mini for coding and agent-like tasks, while still far cheaper than 4.1/4o/5 on many workloads.",
+        "pricing_usd_per_1m_tokens": {
+          "cached_input": 0.025,
+          "input": 0.25,
+          "output": 2
+        },
+        "relative_to_oai_mini": {
+          "input": "1.7x",
+          "output": "3.3x"
+        }
+      }
+    },
     "sonnet": {
       "provider": "anthropic",
       "model": "claude-sonnet-4-6",
@@ -11,12 +140,34 @@
       "context_token_limit": 48000,
       "max_user_messages": 32,
       "max_output_tokens": 4096,
+      "strategy": "summarize",
+      "summarizer_profile": "oai-4.1",
       "color": "bright_magenta",
       "info": {
         "cost_tier": "medium",
+        "cost_vs_value": "Strong alternative to GPT-4.1 for coding and reasoning. Excellent instruction following and long-context understanding.",
         "pricing_usd_per_1m_tokens": {
           "input": 3,
           "output": 15
+        }
+      }
+    },
+    "opus": {
+      "provider": "anthropic",
+      "model": "claude-opus-4-6",
+      "max_context_tokens": 200000,
+      "context_token_limit": 48000,
+      "max_user_messages": 32,
+      "max_output_tokens": 8192,
+      "strategy": "summarize",
+      "summarizer_profile": "oai-4.1",
+      "color": "bright_red",
+      "info": {
+        "cost_tier": "premium",
+        "cost_vs_value": "Most capable Claude model. Best for complex reasoning, architecture decisions, and tasks requiring deep understanding. Highest cost.",
+        "pricing_usd_per_1m_tokens": {
+          "input": 15,
+          "output": 75
         }
       }
     },
@@ -27,44 +178,15 @@
       "context_token_limit": 32000,
       "max_user_messages": 32,
       "max_output_tokens": 4096,
+      "strategy": "summarize",
+      "summarizer_profile": "oai-4.1",
       "color": "bright_green",
       "info": {
         "cost_tier": "very_low",
+        "cost_vs_value": "Fastest and cheapest Claude model. Great for simple tasks, summarization, and high-throughput pipelines.",
         "pricing_usd_per_1m_tokens": {
           "input": 0.8,
           "output": 4
-        }
-      }
-    },
-    "gpt-4.1": {
-      "provider": "openai",
-      "model": "gpt-4.1",
-      "max_context_tokens": 1048576,
-      "context_token_limit": 48000,
-      "max_user_messages": 32,
-      "color": "yellow",
-      "info": {
-        "cost_tier": "high",
-        "pricing_usd_per_1m_tokens": {
-          "cached_input": 0.5,
-          "input": 2,
-          "output": 8
-        }
-      }
-    },
-    "gpt-4o-mini": {
-      "provider": "openai",
-      "model": "gpt-4o-mini",
-      "max_context_tokens": 128000,
-      "context_token_limit": 16000,
-      "max_user_messages": 32,
-      "color": "green",
-      "info": {
-        "cost_tier": "very_low",
-        "pricing_usd_per_1m_tokens": {
-          "cached_input": 0.075,
-          "input": 0.15,
-          "output": 0.6
         }
       }
     },
@@ -75,7 +197,11 @@
       "max_context_tokens": 8192,
       "context_token_limit": 6000,
       "max_user_messages": 16,
-      "color": "cyan"
+      "color": "cyan",
+      "info": {
+        "cost_tier": "local",
+        "cost_vs_value": "Very cheap if you already run Ollama locally. Good for lightweight drafting and experimentation. Lower quality than strong OpenAI coding models."
+      }
     },
     "qwen": {
       "provider": "ollama",
@@ -84,7 +210,11 @@
       "max_context_tokens": 16384,
       "context_token_limit": 12000,
       "max_user_messages": 20,
-      "color": "magenta"
+      "color": "magenta",
+      "info": {
+        "cost_tier": "local",
+        "cost_vs_value": "Strong local budget coding option. Good for drafts, edits, and experiments. Lower quality ceiling than top OpenAI models, but excellent value if local/offline matters."
+      }
     }
   }
 }

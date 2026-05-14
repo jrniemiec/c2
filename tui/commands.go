@@ -1134,7 +1134,7 @@ func cmdLog(m *Model) cmdResult {
 
 	// Script: tail the log, exit when c2 exits OR sentinel file appears; self-deletes on exit.
 	script := fmt.Sprintf(
-		"#!/bin/bash\ntrap 'rm -f \"%s\" \"%s\"' EXIT\ntail -f '%s' & __t=$!\nwhile kill -0 %d 2>/dev/null && [ ! -f '%s' ]; do sleep 1; done\nkill $__t 2>/dev/null\n",
+		"#!/bin/bash\ntrap 'rm -f \"%s\" \"%s\"' EXIT\ntail -n 200 -f '%s' & __t=$!\nwhile kill -0 %d 2>/dev/null && [ ! -f '%s' ]; do sleep 1; done\nkill $__t 2>/dev/null\n",
 		scriptPath, sentinelPath, logPath, pid, sentinelPath,
 	)
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {

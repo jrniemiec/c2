@@ -200,12 +200,6 @@ func Bootstrap(dataDir string) (bool, error) {
 	fmt.Fprintf(os.Stderr, "c2: first run — created %s\n", dataDir)
 	fmt.Fprintf(os.Stderr, "c2: created %s\n", defaultTopicDir)
 	fmt.Fprintf(os.Stderr, "c2: copied default config to %s\n", cfgPath)
-	fmt.Fprintf(os.Stderr, "c2: → edit %s to set your default profile, then run c2 again.\n", cfgPath)
-	fmt.Fprintf(os.Stderr, "c2:\n")
-	fmt.Fprintf(os.Stderr, "c2: API keys are read from environment variables:\n")
-	fmt.Fprintf(os.Stderr, "c2:   Anthropic  — ANTHROPIC_API_KEY  (or C2_ANTHROPIC_API_KEY)\n")
-	fmt.Fprintf(os.Stderr, "c2:   OpenAI     — OPENAI_API_KEY     (or C2_OPENAI_API_KEY)\n")
-	fmt.Fprintf(os.Stderr, "c2:   Ollama     — no key needed, set C2_OLLAMA_HOST if not localhost\n")
 
 	return true, nil
 }

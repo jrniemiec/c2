@@ -3,6 +3,7 @@ package audio
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/gordonklaus/portaudio"
 )
@@ -14,8 +15,9 @@ const (
 
 // Capturer reads mono float32 audio from the default input device.
 type Capturer struct {
-	stream *portaudio.Stream
-	buf    []float32
+	stream  *portaudio.Stream
+	buf     []float32
+	LogFunc func(string, ...any) // optional; called on recoverable errors
 }
 
 // New opens the default input device.
@@ -50,7 +52,22 @@ func (c *Capturer) Start(out chan<- []float32) error {
 				// Buffer overrun — drop the chunk and continue.
 				continue
 			}
-			return err
+			// Transient device error (e.g. Bluetooth disconnect) — log and recover.
+			if c.LogFunc != nil {
+				c.LogFunc("audio: capture error (recovering): %v", err)
+			}
+			_ = c.stream.Stop()
+			_ = c.stream.Close()
+			c.stream = nil
+			time.Sleep(500 * time.Millisecond)
+			c.stream, err = portaudio.OpenDefaultStream(1, 0, SampleRate, FramesPerBuffer, c.buf)
+			if err != nil {
+				return fmt.Errorf("reopen stream: %w", err)
+			}
+			if err := c.stream.Start(); err != nil {
+				return fmt.Errorf("restart stream: %w", err)
+			}
+			continue
 		}
 		chunk := make([]float32, FramesPerBuffer)
 		copy(chunk, c.buf)

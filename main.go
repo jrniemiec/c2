@@ -223,14 +223,20 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "bootstrap: %v\n", err)
 		return 1
 	}
-	if bootstrapped {
-		return 0
-	}
 	cfgPath := config.DefaultConfigPath()
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "config: %v\n", err)
-		return 1
+	var cfg config.Config
+	if bootstrapped {
+		cfg, err = setup.PromptEditConfig(cfgPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "c2: %v\n", err)
+			return 0
+		}
+	} else {
+		cfg, err = config.Load(cfgPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "config: %v\n", err)
+			return 1
+		}
 	}
 	if flagHistoryWindow > 0 {
 		cfg.WindowMessages = flagHistoryWindow
@@ -277,7 +283,9 @@ func run() int {
 					fmt.Fprintf(os.Stderr, "c2config reload: %v\n", err)
 					return 1
 				}
-				fmt.Fprintln(os.Stderr, "c2: voice setup complete — starting in voice mode")
+				if !setup.PromptComplete() {
+					return 0
+				}
 			}
 		} else {
 			fmt.Fprintln(os.Stderr, "c2: starting in text mode (run c2 again to set up voice)")

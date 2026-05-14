@@ -3,31 +3,30 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"os"
+	"sync/atomic"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jrniemiec/c2/audio"
 	"github.com/jrniemiec/c2/c2config"
+	"github.com/jrniemiec/c2/internal/clog"
 	"github.com/jrniemiec/c2/speech"
 	"github.com/jrniemiec/c2/config"
 	"github.com/jrniemiec/c2/engine"
 )
 
-var debugLog *log.Logger
+// ttsMicMute is set to 1 while TTS is playing to suppress VAD+STT in the pipeline.
+// KWS remains active so "Computer" can still interrupt TTS.
+var ttsMicMute int32
 
-func init() {
-	f, err := os.OpenFile(os.ExpandEnv("$HOME/.c2/debug.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_APPEND, 0644)
-	if err == nil {
-		debugLog = log.New(f, "", log.Ltime|log.Lmicroseconds)
-	}
-}
-
-func dbg(format string, args ...any) {
-	if debugLog != nil {
-		debugLog.Printf(format, args...)
+// setTTSMicMute mutes or unmutes the VAD+STT path in the voice pipeline.
+func setTTSMicMute(mute bool) {
+	if mute {
+		atomic.StoreInt32(&ttsMicMute, 1)
+	} else {
+		atomic.StoreInt32(&ttsMicMute, 0)
 	}
 }
 
@@ -51,12 +50,15 @@ func Start(eng *engine.Engine, cfg config.Config, dataDir string, c2cfg c2config
 
 	activeC2Cfg = c2cfg
 
-	// Log the full resolved config at startup for diagnostics.
-	if b, err := json.MarshalIndent(cfg, "", "  "); err == nil {
-		dbg("startup config:\n%s", b)
-	}
-	if b, err := json.MarshalIndent(c2cfg, "", "  "); err == nil {
-		dbg("startup c2config:\n%s", b)
+	// Log the full resolved config at startup — only when the log is fresh
+	// (new session on an empty/absent file) to avoid repeating it every run.
+	if clog.IsNew() {
+		if b, err := json.MarshalIndent(cfg, "", "  "); err == nil {
+			clog.Raw("startup config", string(b))
+		}
+		if b, err := json.MarshalIndent(c2cfg, "", "  "); err == nil {
+			clog.Raw("startup c2config", string(b))
+		}
 	}
 
 	m := New(eng, cfg, dataDir)
@@ -75,9 +77,9 @@ func Start(eng *engine.Engine, cfg config.Config, dataDir string, c2cfg c2config
 	}
 	if _, ok := cfg.Profiles[corrProfile]; !ok {
 		if _, ok2 := cfg.Profiles[cfg.DefaultProfile]; ok2 {
-			dbg("warning: correction_profile %q not found — falling back to default profile %q", corrProfile, cfg.DefaultProfile)
+			clog.Warnf("correction_profile %q not found — falling back to default profile %q", corrProfile, cfg.DefaultProfile)
 		} else {
-			dbg("warning: correction_profile %q not found in config — Ctrl+G correction will fail", corrProfile)
+			clog.Warnf("correction_profile %q not found in config — Ctrl+G correction will fail", corrProfile)
 		}
 	}
 
@@ -149,7 +151,7 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 	var kws *speech.KeywordSpotter
 	var kwsStream *speech.KWSStream
 	if cfg.IsKWSConfigured() {
-		dbg("pipeline: init KWS encoder=%s", cfg.KWSEncoder)
+		clog.Infof("pipeline: init KWS encoder=%s", cfg.KWSEncoder)
 		var err error
 		kws, err = speech.NewKeywordSpotter(speech.KWSConfig{
 			Encoder:      cfg.KWSEncoder,
@@ -173,11 +175,11 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 				kwsStream.Close()
 			}
 		}()
-		dbg("pipeline: KWS ready")
+		clog.Infof("pipeline: KWS ready")
 	}
 
 	// Initialise VAD.
-	dbg("pipeline: init VAD model=%s", cfg.VADModel)
+	clog.Infof("pipeline: init VAD model=%s", cfg.VADModel)
 	vad, err := speech.NewVAD(speech.VADConfig{
 		ModelPath:  cfg.VADModel,
 		SampleRate: audio.SampleRate,
@@ -187,10 +189,10 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 		return
 	}
 	defer vad.Close()
-	dbg("pipeline: VAD ready")
+	clog.Infof("pipeline: VAD ready")
 
 	// Initialise STT.
-	dbg("pipeline: init STT encoder=%s decoder=%s", cfg.STTEncoder, cfg.STTDecoder)
+	clog.Infof("pipeline: init STT encoder=%s decoder=%s", cfg.STTEncoder, cfg.STTDecoder)
 	stt, err := speech.NewRecognizer(speech.STTConfig{
 		Encoder:    cfg.STTEncoder,
 		Decoder:    cfg.STTDecoder,
@@ -203,7 +205,7 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 		return
 	}
 	defer stt.Close()
-	dbg("pipeline: STT ready")
+	clog.Infof("pipeline: STT ready")
 
 	// Initialise audio capture.
 	cap, err := audio.New()
@@ -211,7 +213,7 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 		send(voicePipelineErrMsg{fmt.Errorf("audio init: %w", err)})
 		return
 	}
-	cap.LogFunc = dbg
+	cap.LogFunc = clog.Debugf
 
 	audioCh := make(chan []float32, 32)
 	capErrCh := make(chan error, 1)
@@ -243,7 +245,7 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 			return
 
 		case newState := <-stateChangeCh:
-			dbg("pipeline: state %s → %s", currentState, newState)
+			clog.Debugf("pipeline: state %s → %s", currentState, newState)
 			computerPending = false
 			currentState = newState
 			// Reset audio accumulator on every state change.
@@ -282,13 +284,13 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 				speechSpeechSeen = false
 				speechSilenceCount = 0
 				speechLastActiveSample = 0
-				dbg("pipeline: over-flush state=%s samples=%d", currentState, len(buf))
+				clog.Debugf("pipeline: over-flush state=%s samples=%d", currentState, len(buf))
 				text, err := stt.Transcribe(buf)
 				if err != nil {
-					dbg("pipeline: STT error: %v", err)
+					clog.Errorf("pipeline: STT error: %v", err)
 					send(voicePipelineErrMsg{fmt.Errorf("STT: %w", err)})
 				} else {
-					dbg("pipeline: transcript=%q", text)
+					clog.Debugf("pipeline: transcript=%q", text)
 					send(voiceTranscriptMsg{text: text, final: true})
 				}
 			}
@@ -325,10 +327,10 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 					}
 				}
 				if label := kwsStream.Process(kwsChunk); label != "" {
-					dbg("pipeline: KWS keyword=%q state=%s", label, currentState)
+					clog.Debugf("pipeline: KWS keyword=%q state=%s", label, currentState)
 					if label == "computer" {
 						if computerPending {
-							dbg("pipeline: computer ignored (pending acknowledgement)")
+							clog.Debugf("pipeline: computer ignored (pending acknowledgement)")
 						} else {
 							computerPending = true
 							send(voiceKWSEventMsg{keyword: label})
@@ -367,7 +369,7 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 				}
 				if rms > speechSilenceThreshold {
 					if !speechSpeechSeen {
-						dbg("pipeline: awake speech onset")
+						clog.Debugf("pipeline: awake speech onset")
 						send(voiceSpeechStartedMsg{})
 						speechSpeechSeen = true
 					}
@@ -388,13 +390,13 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 					speechSpeechSeen = false
 					speechSilenceCount = 0
 					speechLastActiveSample = 0
-					dbg("pipeline: awake flush samples=%d", len(buf))
+					clog.Debugf("pipeline: awake flush samples=%d", len(buf))
 					text, err := stt.Transcribe(buf)
 					if err != nil {
-						dbg("pipeline: STT error: %v", err)
+						clog.Errorf("pipeline: STT error: %v", err)
 						send(voicePipelineErrMsg{fmt.Errorf("STT: %w", err)})
 					} else {
-						dbg("pipeline: awake transcript=%q", text)
+						clog.Debugf("pipeline: awake transcript=%q", text)
 						send(voiceTranscriptMsg{text: text, final: true})
 					}
 				}
@@ -407,21 +409,27 @@ func runVoicePipeline(cfg c2config.C2Config, stop <-chan struct{}, stateChangeCh
 			if currentState != VoiceDictating && currentState != VoiceConversing {
 				continue
 			}
+			// Mute VAD+STT while TTS is playing to avoid feedback loops.
+			// KWS above still runs so "Computer" can interrupt TTS.
+			if atomic.LoadInt32(&ttsMicMute) != 0 {
+				vad.Reset()
+				continue
+			}
 			events := vad.Process(chunk)
 			for _, ev := range events {
 				if ev.Started {
-					dbg("pipeline: speech started state=%s", currentState)
+					clog.Debugf("pipeline: speech started state=%s", currentState)
 					send(voiceSpeechStartedMsg{})
 				}
 				if ev.Segment != nil {
-					dbg("pipeline: segment ready, samples=%d", len(ev.Segment))
+					clog.Debugf("pipeline: segment ready, samples=%d", len(ev.Segment))
 					text, err := stt.Transcribe(ev.Segment)
 					if err != nil {
-						dbg("pipeline: STT error: %v", err)
+						clog.Debugf("pipeline: STT error: %v", err)
 						send(voicePipelineErrMsg{fmt.Errorf("STT: %w", err)})
 						continue
 					}
-					dbg("pipeline: transcript=%q", text)
+					clog.Debugf("pipeline: transcript=%q", text)
 					// partial=false means append to input, don't submit yet
 					send(voiceTranscriptMsg{text: text, final: false})
 				}

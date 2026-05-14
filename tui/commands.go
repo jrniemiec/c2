@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/jrniemiec/c2/config"
 	"github.com/jrniemiec/c2/core"
+	"github.com/jrniemiec/c2/internal/clog"
 	"github.com/jrniemiec/c2/store"
 )
 
@@ -740,6 +742,9 @@ func cmdProfileDefaultSet(m *Model, args []string) cmdResult {
 // system commands
 // =============================================================================
 
+const defaultSystemPrompt = `You are a helpful, concise assistant. Respond clearly and directly.
+`
+
 func cmdSystem(m *Model, args []string) cmdResult {
 	text := m.eng.SystemPrompt()
 	if text == "" {
@@ -751,7 +756,30 @@ func cmdSystem(m *Model, args []string) cmdResult {
 
 func cmdSystemSet(m *Model, args []string) cmdResult {
 	if len(args) == 0 {
-		return errResult("/system-set", "usage: /system-set <text>")
+		// No text — open $EDITOR on system.txt.
+		editor := os.Getenv("EDITOR")
+		if editor == "" {
+			return errResult("/system-set", "$EDITOR is not set — add 'export EDITOR=<path>' to your shell config")
+		}
+		filePath := m.eng.SystemPath()
+		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+			return errResult("/system-set", err.Error())
+		}
+		// Write the default template if the file is missing or the current
+		// system prompt is empty (covers first-run and the stale "[text]" artifact).
+		if current := strings.TrimSpace(m.eng.SystemPrompt()); current == "" || current == "[text]" {
+			if err := os.WriteFile(filePath, []byte(defaultSystemPrompt), 0o644); err != nil {
+				return errResult("/system-set", err.Error())
+			}
+		}
+		editorCmd := exec.Command(editor, filePath)
+		return cmdResult{
+			input:           "/system-set",
+			suppressCmdPane: true,
+			execCmd: tea.ExecProcess(editorCmd, func(err error) tea.Msg {
+				return systemReloadMsg{}
+			}),
+		}
 	}
 	text := strings.Join(args, " ")
 	if err := m.eng.SetSystem(text); err != nil {
@@ -814,6 +842,14 @@ func cmdConfig(m *Model) cmdResult {
 			}
 			lines = append(lines, fmt.Sprintf("    %-16s%s%s", code, strings.Join(parts, ", "), marker))
 		}
+	}
+
+	// Dump full JSON config to the log file for deeper inspection.
+	if b, err := json.MarshalIndent(cfg, "", "  "); err == nil {
+		clog.Raw("/config", string(b))
+	}
+	if b, err := json.MarshalIndent(m.c2cfg, "", "  "); err == nil {
+		clog.Raw("/config c2", string(b))
 	}
 
 	return okResult("/config", lines)
@@ -1039,7 +1075,7 @@ func allCompletions() []completionEntry {
 		{"/profile-default", "show default profile"},
 		{"/profile-default-set", "set default profile"},
 		{"/system", "show system prompt"},
-		{"/system-set", "set system prompt"},
+		{"/system-set", "set system prompt (no args opens $EDITOR)"},
 		{"/system-clear", "remove system prompt"},
 		{"/config", "show resolved configuration"},
 		{"/status", "show effective defaults"},
@@ -1125,11 +1161,11 @@ func cmdLog(m *Model) cmdResult {
 		m.logViewerOpen = false
 		return cmdResult{
 			input:  "/log",
-			output: []string{"debug log viewer closed"},
+			output: []string{"log viewer closed"},
 		}
 	}
 
-	logPath := os.ExpandEnv("$HOME/.c2/debug.log")
+	logPath := os.ExpandEnv("$HOME/.c2/c2.log")
 	scriptPath := fmt.Sprintf("%s/c2-log-viewer-%d.sh", os.TempDir(), pid)
 
 	// Script: tail the log, exit when c2 exits OR sentinel file appears; self-deletes on exit.
@@ -1159,7 +1195,7 @@ func cmdLog(m *Model) cmdResult {
 
 	return cmdResult{
 		input:  "/log",
-		output: []string{"debug log opened in new window — /log again to close"},
+		output: []string{"log viewer opened in new window — /log again to close"},
 	}
 }
 
@@ -1322,7 +1358,7 @@ func cmdHelp(cmd string, args []string) cmdResult {
 		},
 		"system": {
 			{"/system", "show system prompt"},
-			{"/system-set <text>", "set system prompt"},
+			{"/system-set", "set system prompt (no args opens $EDITOR)"},
 			{"/system-clear", "remove system prompt"},
 		},
 		"info": {

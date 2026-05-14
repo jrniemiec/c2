@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jrniemiec/c2/config"
+	"github.com/jrniemiec/c2/internal/clog"
 )
 
 // PromptEditConfig tells the user to edit the config, then loops until the
@@ -33,12 +34,15 @@ func PromptEditConfig(cfgPath string) (config.Config, error) {
 		cfg, err := config.Load(cfgPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "c2: config error: %v — fix the file and try again\n", err)
+			clog.Warnf("bootstrap: config load error: %v", err)
 			continue
 		}
 		if err := validateConfig(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "c2: %v — fix the file and try again\n", err)
+			clog.Warnf("bootstrap: config validation error: %v", err)
 			continue
 		}
+		clog.Infof("bootstrap: config validated OK, default_profile=%s", cfg.DefaultProfile)
 		return cfg, nil
 	}
 }
@@ -46,6 +50,7 @@ func PromptEditConfig(cfgPath string) (config.Config, error) {
 // PromptComplete reports that bootstrapping is done and waits for the user to confirm before continuing.
 // Returns false if the user chose to quit.
 func PromptComplete() bool {
+	clog.Infof("bootstrap: voice setup complete")
 	fmt.Fprintln(os.Stderr, "c2: bootstrap complete — all models downloaded and config written")
 	fmt.Fprint(os.Stderr, "c2: continue? [Y/n]: ")
 	r := bufio.NewReader(os.Stdin)

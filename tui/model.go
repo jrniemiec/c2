@@ -81,6 +81,7 @@ type voicePipelineErrMsg struct{ err error } // pipeline failed to start or cras
 type voiceAutoSubmitMsg struct{}              // fires 500ms after transcript to auto-send
 type clipboardFlashMsg struct{}              // fires 1.5s after copy to clear the flash
 type resourceReloadMsg struct{ name string } // fires after external editor exits
+type systemReloadMsg struct{}               // fires after system prompt editor exits
 
 // Model is the root Bubbletea application model.
 type Model struct {
@@ -583,6 +584,7 @@ func (m *Model) killTTS() {
 	m.ttsPendingSentences = nil
 	m.streamSentenceBuf = ""
 	m.resourceTTSQueue = nil
+	setTTSMicMute(false)
 	if m.ttsCmd != nil {
 		cmd := m.ttsCmd
 		m.ttsCmd = nil

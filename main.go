@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/jrniemiec/c2/c2config"
 	"github.com/jrniemiec/c2/config"
 	"github.com/jrniemiec/c2/engine"
+	"github.com/jrniemiec/c2/internal/clog"
 	"github.com/jrniemiec/c2/setup"
 	"github.com/jrniemiec/c2/tui"
 )
@@ -50,6 +52,9 @@ var (
 	flagAllProfiles   bool
 	flagJSON          bool
 	flagForce         bool
+
+	// logging
+	flagLogLevel string
 
 	// display
 	flagSize     int
@@ -125,6 +130,9 @@ func init() {
 	flag.BoolVar(&flagJSON, "json", false, "output result as JSON")
 	flag.BoolVar(&flagForce, "force", false, "skip confirmation prompts")
 	flag.BoolVar(&flagForce, "f", false, "skip confirmation prompts")
+
+	// logging
+	flag.StringVar(&flagLogLevel, "log-level", "", "log level: debug|info|warn|error (default info, env: C2_LOG_LEVEL)")
 
 	// display / help
 	flag.IntVar(&flagSize, "size", 20, "exchanges/lines to show for topic-history/topic-summary")
@@ -218,6 +226,16 @@ func c2Data() string {
 func run() int {
 	os.Setenv("C2_DATA", c2Data())
 	dataDir := config.DataDir()
+	logLevelStr := flagLogLevel
+	if logLevelStr == "" {
+		logLevelStr = os.Getenv("C2_LOG_LEVEL")
+	}
+	logLevel, ok := clog.ParseLevel(logLevelStr)
+	if !ok {
+		logLevel = slog.LevelInfo
+	}
+	_ = os.Chdir(dataDir)
+	clog.Init(filepath.Join(dataDir, "c2.log"), logLevel)
 	bootstrapped, err := config.Bootstrap(dataDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bootstrap: %v\n", err)

@@ -8,12 +8,15 @@ A TUI-based command-and-control app for interacting with LLMs, bootstrapped from
 
 - **Voice + text input** — speak or type, switch modes with Tab
 - **Full voice pipeline** — keyword wake word (KWS) → VAD → STT → command recognition or LLM
-- **TTS readout** — Kokoro (neural) or macOS `say` backend
+- **TTS readout** — Kokoro (neural) or macOS `say` backend; mic muted during playback to prevent feedback
+- **Shell commands** — prefix input with `!` to run shell commands; output shown in the results pane
 - **Resource viewer** — full-screen in-app overlay with TTS playback from cursor position
 - **Note dictation** — voice "note" mode prefixes input with `//`; clipboard copy strips it
 - **Input correction** — Ctrl+G or voice "correct that" sends input to an LLM for spell/grammar fix
+- **System prompt editor** — `/system-set` with no args opens `$EDITOR` on the topic's `system.txt`
 - **Topics, profiles, system prompts, resources, stats**
-- **Self-contained** — all data and config stored in `~/.c2/`
+- **Structured logging** — `~/.c2/c2.log` with rotation; level controlled via `--log-level` or `C2_LOG_LEVEL`
+- **Self-contained** — all data and config stored in `~/.c2/` (working directory on launch)
 
 ---
 
@@ -90,7 +93,7 @@ All configuration and data live under `~/.c2/`.
 
 ```
 ~/.c2/config.json       main config (LLM profiles + voice settings)
-~/.c2/debug.log         voice pipeline and setup debug log
+~/.c2/c2.log            application log (use --log-level to control verbosity)
 ~/.c2/models/           downloaded voice models
 ```
 
@@ -163,6 +166,7 @@ c2 [flags]
 | `--ack-all-deletions` | | Require confirmation for all deletions |
 | `--chat-labels` | | Prefix turns with [you]/[profile] (default: true) |
 | `--speak-corrected-note` | | Speak corrected text after Ctrl+G or "correct that" (default: true) |
+| `--log-level <level>` | | Log level: `debug\|info\|warn\|error` (default: `info`, env: `C2_LOG_LEVEL`) |
 | `--no-tui` / `-nw` | | Headless/CLI mode |
 | `--tts` | | Speak response in CLI mode |
 | `--version` | `-v` | Print version and exit |
@@ -225,7 +229,7 @@ The **status bar** is context-sensitive:
 
 | Key | Action |
 |---|---|
-| `Enter` | Send prompt |
+| `Enter` | Send prompt / execute `!` shell command |
 | `Ctrl+J` | Insert newline (multi-line input) |
 | `Ctrl+G` | Send input for spell/grammar correction (replaced in-place) |
 | `Tab` | Fill completion (input) / toggle voice/text mode |
@@ -327,7 +331,7 @@ Resource files are referenced in prompts with `@name`. Supported path forms:
 | Command | Description |
 |---|---|
 | `/system` | Show system prompt |
-| `/system-set <text>` | Set system prompt |
+| `/system-set [text]` | Set system prompt inline, or open `$EDITOR` when called with no args |
 | `/system-clear` | Remove system prompt |
 
 ### Info & view
@@ -338,7 +342,7 @@ Resource files are referenced in prompts with `@name`. Supported path forms:
 | `/status` | Show effective defaults |
 | `/stats` | Usage and cost stats |
 | `/voice-commands` | List all voice phrases |
-| `/log` | Toggle debug log tail in a new terminal window |
+| `/log` | Toggle log tail (`~/.c2/c2.log`) in a new terminal window |
 | `/help [group]` | Show help (groups: topic resource profile system session info notes files nav theme view) |
 | `/delete-last [n]` | Delete last N exchanges |
 | `/tts [on\|off]` | Toggle auto-speech (no arg = toggle) |
@@ -457,7 +461,7 @@ Speak naturally after the wake word. Filler words ("please", "um", "hey", "just"
 | "status" / "show status" | Show effective defaults |
 | "stats" / "statistics" | Usage and cost |
 | "voice commands" / "what can I say" | List voice phrases |
-| "show log" / "open log" / "close log" | Toggle debug log tail window |
+| "show log" / "open log" / "close log" | Toggle log tail window |
 | "help" / "show help" | Show help |
 
 ### Voice accelerators
@@ -484,6 +488,7 @@ c2/
 │   ├── commands.go    slash command handlers
 │   ├── keys.go        key bindings
 │   └── voicefsm.go    FSM state types + command synonyms
+├── internal/clog/     structured logger (slog + lumberjack rotation)
 ├── config/            provider config
 ├── engine/            LLM engine
 ├── provider/          API providers

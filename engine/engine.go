@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -262,6 +263,11 @@ func (e *Engine) SetSystemForTopic(topicName, text string) error {
 // LoadSummary returns the current summary for the active topic.
 func (e *Engine) LoadSummary() (string, int, error) {
 	return e.st.LoadSummary(e.topicName)
+}
+
+// SystemPath returns the path to the active topic's system.txt file.
+func (e *Engine) SystemPath() string {
+	return filepath.Join(e.cfg.TopicsRoot, e.topicName, "system.txt")
 }
 
 // ResourceDir returns the path to the active topic's resources/ directory.

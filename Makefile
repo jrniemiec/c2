@@ -104,7 +104,4 @@ dist: build
 
 release:
 	@if [ -z "$(VERSION)" ]; then echo "usage: make release VERSION=x.y.z"; exit 1; fi
-	$(MAKE) dist VERSION=$(VERSION)
-	git tag v$(VERSION)
-	git push origin v$(VERSION)
-	@echo "Upload dist/$(DIST_NAME).tar.gz to the GitHub release for v$(VERSION)"
+	scripts/release-c2.sh $(VERSION)

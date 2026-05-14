@@ -15,6 +15,7 @@ import (
 
 	"github.com/jrniemiec/c2/audio"
 	"github.com/jrniemiec/c2/c2config"
+	"github.com/jrniemiec/c2/internal/clog"
 	"github.com/jrniemiec/c2/speech"
 	"github.com/jrniemiec/c2/config"
 	"github.com/jrniemiec/c2/core"
@@ -167,14 +168,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case voiceAwakeTimeoutMsg:
 		if m.voiceState == VoiceAwake {
-			dbg("fsm: AWAKE timeout → %s", m.voiceReturnState)
+			clog.Debugf("fsm: AWAKE timeout → %s", m.voiceReturnState)
 			m.setVoiceState(m.voiceReturnState)
 			go playBeep(beepUnrecognized)
 		}
 
 	case voiceExecutingTimeoutMsg:
 		if m.voiceState == VoiceExecuting {
-			dbg("fsm: EXECUTING timeout → IDLE")
+			clog.Debugf("fsm: EXECUTING timeout → IDLE")
 			m.setVoiceState(VoiceIdle)
 			go playBeep(beepUnrecognized)
 		}
@@ -185,6 +186,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastCmd = nil
 			m.syncLayout()
 		}
+
+	case systemReloadMsg:
+		data, err := os.ReadFile(m.eng.SystemPath())
+		if err != nil && !os.IsNotExist(err) {
+			clog.Errorf("system-set: read system.txt: %v", err)
+			break
+		}
+		text := strings.TrimSpace(string(data))
+		if err := m.eng.SetSystem(text); err != nil {
+			clog.Errorf("system-set: save: %v", err)
+		}
+		m.rebuildConvContent()
 
 	case resourceReloadMsg:
 		// Re-read the file. If the resource viewer is open for this file, refresh it.
@@ -223,7 +236,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			if label := matchVoiceCommand(msg.text); label != "" {
-				dbg("fsm: STT command match %q → %q", msg.text, label)
+				clog.Debugf("fsm: STT command match %q → %q", msg.text, label)
 				if m.awakeTimer != nil {
 					m.awakeTimer.Stop()
 					m.awakeTimer = nil
@@ -232,7 +245,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				// No command match — increment fail counter.
 				m.voiceFailCount++
-				dbg("fsm: STT no command match for %q, fail=%d", msg.text, m.voiceFailCount)
+				clog.Debugf("fsm: STT no command match for %q, fail=%d", msg.text, m.voiceFailCount)
 				m.syncLayout()
 				if m.voiceFailCount >= 3 {
 					// Third miss — give up, return to previous state.
@@ -383,7 +396,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.setVoiceState(VoiceConversing)
 		}
+		// Unmute mic only when all queues are empty (no more TTS coming).
+		if !m.isTTSPlaying() && len(m.ttsPendingSentences) == 0 &&
+			len(m.ttsQueue) == 0 && len(m.resourceTTSQueue) == 0 {
+			setTTSMicMute(false)
+		}
 		m.rebuildConvContent()
+
+	case shellDoneMsg:
+		result := cmdResult{
+			input:   "! " + msg.cmd,
+			output:  strings.Split(strings.TrimRight(msg.output, "\n"), "\n"),
+			isError: msg.exitCode != 0,
+		}
+		if msg.exitCode != 0 {
+			result.warnLine = fmt.Sprintf("[exit %d]", msg.exitCode)
+		}
+		m.lastCmd = &result
+		m.cmdPaneOpen = true
+		m.setFocus(paneCmd)
+		m.input.Blur()
+		m.syncLayout()
+		m.cmdScroll.SetContent(renderCmdOutput(&m))
+		m.cmdScroll.GotoTop()
 
 	case correctionDoneMsg:
 		m.correcting = false
@@ -419,7 +454,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.correctionVoiceState = VoiceIdle
 			}
 			if msg.err != nil {
-				dbg("correction error: %v", msg.err)
+				clog.Errorf("correction error: %v", msg.err)
 				errStr := msg.err.Error()
 				if len(errStr) > 40 {
 					errStr = errStr[:40] + "…"
@@ -471,7 +506,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch m.voiceState {
 			case VoiceAwake:
 				// Already awake — cancel back to previous state.
-				dbg("fsm: ctrl+space cancel AWAKE → %s", m.voiceReturnState)
+				clog.Debugf("fsm: ctrl+space cancel AWAKE → %s", m.voiceReturnState)
 				if m.awakeTimer != nil {
 					m.awakeTimer.Stop()
 					m.awakeTimer = nil
@@ -480,7 +515,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				go playBeep(beepUnrecognized)
 			default:
 				// Activate AWAKE — same as "computer" KWS event.
-				dbg("fsm: ctrl+space → AWAKE")
+				clog.Debugf("fsm: ctrl+space → AWAKE")
 				m.suspendTTS()
 				m.voiceReturnState = m.voiceState
 				m.voiceFailCount = 0
@@ -792,6 +827,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				} else {
 					m.pushHistory(val)
+					if strings.HasPrefix(val, "!") {
+						// Shell command — run via sh -c, show output in cmd pane.
+						m.input.Reset()
+						shellCmd := strings.TrimSpace(val[1:])
+						cmds = append(cmds, runShellCmd(shellCmd))
+						break
+					}
 					if !strings.HasPrefix(val, "/") && looksLikeCommand(val) {
 						val = "/" + val
 					}
@@ -1102,6 +1144,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.input.SetHeight(visualH)
 				}
 				cmds = append(cmds, inputCmd)
+				// Auto-insert space after '!' so the command reads "! cmd" not "!cmd".
+				if m.input.Value() == "!" {
+					m.input.SetValue("! ")
+					m.input.CursorEnd()
+				}
 				// Update completion list based on new input value.
 				val := m.input.Value()
 				if strings.HasPrefix(val, "/") && !strings.Contains(val, " ") {
@@ -1249,6 +1296,42 @@ func (m *Model) sendMessage() tea.Cmd {
 }
 
 // =============================================================================
+// Shell command execution (! prefix)
+// =============================================================================
+
+type shellDoneMsg struct {
+	cmd      string
+	output   string
+	exitCode int
+}
+
+// runShellCmd executes cmd via the user's login shell with a 30s timeout and returns shellDoneMsg.
+func runShellCmd(cmd string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		shell := os.Getenv("SHELL")
+		if shell == "" {
+			shell = "sh"
+		}
+		c := exec.CommandContext(ctx, shell, "-i", "-c", cmd)
+		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		out, err := c.CombinedOutput()
+		exitCode := 0
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				// Non-exit error (e.g. timeout): treat as exit 1.
+				exitCode = 1
+				out = append(out, []byte("\n"+err.Error())...)
+			}
+		}
+		return shellDoneMsg{cmd: cmd, output: string(out), exitCode: exitCode}
+	}
+}
+
+// =============================================================================
 // Input correction (Ctrl+R)
 // =============================================================================
 
@@ -1386,6 +1469,7 @@ func startTTS(text string, exIdx int, m *Model) tea.Cmd {
 	gen := m.ttsGen
 	m.ttsExIdx = exIdx
 	m.rebuildConvContent()
+	setTTSMicMute(true)
 
 	if m.c2cfg.TTSBackend == "kokoro" {
 		return startTTSKokoro(text, gen, m)
@@ -1466,7 +1550,7 @@ func startTTSKokoro(text string, gen int, m *Model) tea.Cmd {
 
 // setVoiceState updates the FSM state in the model and notifies the pipeline.
 func (m *Model) setVoiceState(s VoiceState) {
-	dbg("fsm: %s → %s", m.voiceState, s)
+	clog.Debugf("fsm: %s → %s", m.voiceState, s)
 	m.voiceState = s
 	if m.stateChangeCh != nil {
 		// Non-blocking send: pipeline drains this before the next audio chunk.
@@ -1490,10 +1574,10 @@ const awakeTimeout = 20 * time.Second
 func (m *Model) handleKWSEvent(keyword string) []tea.Cmd {
 	// Filter by the active keyword set for this state.
 	if !m.voiceState.activeKeywords()[keyword] {
-		dbg("fsm: keyword %q ignored in state %s", keyword, m.voiceState)
+		clog.Debugf("fsm: keyword %q ignored in state %s", keyword, m.voiceState)
 		return nil
 	}
-	dbg("fsm: keyword=%q state=%s", keyword, m.voiceState)
+	clog.Debugf("fsm: keyword=%q state=%s", keyword, m.voiceState)
 
 	var cmds []tea.Cmd
 
@@ -1526,7 +1610,7 @@ func (m *Model) handleKWSEvent(keyword string) []tea.Cmd {
 	case VoiceAwake:
 		if keyword == "computer" {
 			// Already awake — ignore duplicate wake word.
-			dbg("fsm: computer ignored (already AWAKE)")
+			clog.Debugf("fsm: computer ignored (already AWAKE)")
 		} else {
 			cancelTimer(&m.awakeTimer)
 			cmds = append(cmds, m.executeAwakeCommand(keyword)...)
@@ -2080,7 +2164,7 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 
 	default:
 		// Unrecognised label — return to previous state.
-		dbg("fsm: unrecognised command %q, returning to %s", label, m.voiceReturnState)
+		clog.Debugf("fsm: unrecognised command %q, returning to %s", label, m.voiceReturnState)
 		m.setVoiceState(m.voiceReturnState)
 		go playBeep(beepUnrecognized)
 	}
@@ -2169,7 +2253,7 @@ const (
 
 // sayAck speaks "OK" via macOS say(1) as a command acknowledgement.
 func sayAck() {
-	dbg("beep: say OK")
+	clog.Debugf("beep: say OK")
 	args := []string{"OK"}
 	if activeC2Cfg.TTSVoice != "" {
 		args = append([]string{"-v", activeC2Cfg.TTSVoice}, args...)
@@ -2187,7 +2271,7 @@ func sayPrompt(n int) {
 	} else {
 		phrase = "Say again?"
 	}
-	dbg("beep: say prompt n=%d %q", n, phrase)
+	clog.Debugf("beep: say prompt n=%d %q", n, phrase)
 	args := []string{phrase}
 	if activeC2Cfg.TTSVoice != "" {
 		args = append([]string{"-v", activeC2Cfg.TTSVoice}, args...)
@@ -2212,7 +2296,7 @@ func sayVoiceStatus(returnState VoiceState, topic, model string) {
 		state = "Ready"
 	}
 	phrase := fmt.Sprintf("%s. Topic: %s. Model: %s.", state, topic, model)
-	dbg("beep: say voice status %q", phrase)
+	clog.Debugf("beep: say voice status %q", phrase)
 	args := []string{phrase}
 	if activeC2Cfg.TTSVoice != "" {
 		args = append([]string{"-v", activeC2Cfg.TTSVoice}, args...)
@@ -2223,7 +2307,7 @@ func sayVoiceStatus(returnState VoiceState, topic, model string) {
 
 // beepSoftChime plays a soft 880Hz tone with a linear fade-out envelope.
 func beepSoftChime() {
-	dbg("beep: soft chime")
+	clog.Debugf("beep: soft chime")
 	const sampleRate = 16000
 	const freq = 880.0
 	const durationMs = 200
@@ -2241,7 +2325,7 @@ func beepSoftChime() {
 
 // beepEarcon plays a two-note C5→E5 motif (~60ms each).
 func beepEarcon() {
-	dbg("beep: earcon")
+	clog.Debugf("beep: earcon")
 	const sampleRate = 16000
 	const durationMs = 70
 	const amplitude = 0.30
@@ -2271,14 +2355,14 @@ func beepEarcon() {
 
 // playAck is the command-acknowledgement sound. Switch the call to compare options.
 func playAck() {
-	dbg("beep: ack (earcon)")
+	clog.Debugf("beep: ack (earcon)")
 	beepEarcon() // options: sayAck(), beepSoftChime(), beepEarcon()
 }
 
 // playBeep plays a short audio tone for the given event. Runs in a goroutine.
 // First pass: simple sine-wave tones generated inline via the audio package.
 func playBeep(kind string) {
-	dbg("beep: %s", kind)
+	clog.Debugf("beep: %s", kind)
 	const sampleRate = 16000
 	type tone struct{ freq float64; durationMs int }
 	var t tone

@@ -8,11 +8,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/jrniemiec/c2/internal/clog"
 )
 
 const (
@@ -40,21 +41,10 @@ func Prompt() bool {
 // RunVoiceSetup downloads models into dataDir/models/ and writes the c2
 // section into the config file at cfgPath.
 func RunVoiceSetup(dataDir, cfgPath string) error {
-	// Open debug log so setup progress is recorded alongside runtime logs.
-	logPath := filepath.Join(dataDir, "debug.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	var setupLog *log.Logger
-	if err == nil {
-		setupLog = log.New(logFile, "", log.Ltime|log.Lmicroseconds)
-		defer logFile.Close()
-	}
-
-	// logf writes to stderr (for the user watching the bootstrap) and to the debug log.
+	// logf writes to stderr (for the user watching) and to the log file.
 	logf := func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "c2: "+format+"\n", args...)
-		if setupLog != nil {
-			setupLog.Printf("setup: "+format, args...)
-		}
+		clog.Infof("setup: "+format, args...)
 	}
 
 	modelsDir := filepath.Join(dataDir, "models")

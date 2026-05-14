@@ -118,6 +118,16 @@ func fgBold(col lipgloss.Color, text string) string {
 	return "\033[1m" + text + "\033[0m"
 }
 
+// fgShell renders text in bright bold red when the first logical line starts
+// with '!', otherwise falls back to normal InputText color.
+func fgShell(t Theme, firstLine, text string) string {
+	if strings.HasPrefix(firstLine, "!") {
+		// bright bold red: ESC[1;91m
+		return "\033[1;91m" + text + "\033[0m"
+	}
+	return fg(t.InputText, text)
+}
+
 // lerpColor interpolates between c1 (t=0) and c2 (t=1).
 func lerpColor(c1, c2 lipgloss.Color, t float64) lipgloss.Color {
 	r1, g1, b1, ok1 := hexToRGB(string(c1))
@@ -558,20 +568,38 @@ func renderWaveIndicator(frame int, label string, bright, dim lipgloss.Color) st
 // background, potentially differing from the terminal's configured background).
 //
 // The textarea model is kept for editing state and cursor position only.
+// shellBorderColor returns bright bold red ANSI if input starts with '!', empty otherwise.
+// Used to tint both separator lines surrounding the input pane.
+const shellBorderColor = "\033[1;91m"
+
+func shellSep(m *Model, fallback string) string {
+	if strings.HasPrefix(m.input.Value(), "!") {
+		return shellBorderColor + strings.Repeat("─", m.width) + "\033[0m"
+	}
+	return fallback
+}
+
 func renderInputPane(m *Model) string {
 	t := ActiveTheme
 	var sep string
 	if m.focus == paneConv {
-		sep = fg(t.InputPrompt, strings.Repeat("─", m.width))
+		sep = shellSep(m, fg(t.InputPrompt, strings.Repeat("─", m.width)))
 	} else {
-		sep = fg(t.BoxBorder, strings.Repeat("─", m.width))
+		sep = shellSep(m, fg(t.BoxBorder, strings.Repeat("─", m.width)))
 	}
 
 	prompt := m.inputPrompt()
 	promptRunes := []rune(prompt)
 	const padW = 1
-	line0W := m.width - padW - len(promptRunes)
-	contW := m.width - padW
+	shellMode := strings.HasPrefix(m.input.Value(), "!")
+	var line0W, contW int
+	if shellMode {
+		line0W = m.width
+		contW = m.width
+	} else {
+		line0W = m.width - padW - len(promptRunes)
+		contW = m.width - padW
+	}
 	if line0W < 1 {
 		line0W = 1
 	}
@@ -629,10 +657,18 @@ func renderInputPane(m *Model) string {
 					pulse := (1 - math.Cos(phase*2*math.Pi)) / 2
 					promptColor = lerpColor(t.Dimmed, t.TopBarText, pulse)
 				}
-				prefix = strings.Repeat(" ", padW) + fg(promptColor, prompt)
+				if shellMode {
+					prefix = ""
+				} else {
+					prefix = strings.Repeat(" ", padW) + fg(promptColor, prompt)
+				}
 				firstVisualLine = false
 			} else {
-				prefix = strings.Repeat(" ", padW)
+				if shellMode {
+					prefix = ""
+				} else {
+					prefix = strings.Repeat(" ", padW)
+				}
 			}
 
 			// Is cursor in this chunk?
@@ -662,11 +698,11 @@ func renderInputPane(m *Model) string {
 						}
 					}
 					rendered = append(rendered,
-						prefix+fg(t.InputText, before)+cursorSeq+fg(t.InputText, after))
+						prefix+fgShell(t, logicalLines[0], before)+cursorSeq+fgShell(t, logicalLines[0], after))
 					continue
 				}
 			}
-			rendered = append(rendered, prefix+fg(t.InputText, string(ch.runes)))
+			rendered = append(rendered, prefix+fgShell(t, logicalLines[0], string(ch.runes)))
 		}
 	}
 
@@ -768,7 +804,7 @@ func renderParamPane(m *Model) string {
 
 func renderBottomPane(m *Model) string {
 	t := ActiveTheme
-	sep := fg(t.BoxBorder, strings.Repeat("─", m.width))
+	sep := shellSep(m, fg(t.BoxBorder, strings.Repeat("─", m.width)))
 	if len(m.paramItems) > 0 {
 		return sep + renderParamPane(m)
 	}

@@ -8,6 +8,19 @@ set -euo pipefail
 REPO="jrniemiec/c2"
 HOMEBREW_FORMULA="$HOME/dev/homebrew-c2/Formula/c2.rb"
 
+# --- Helpers -----------------------------------------------------------------
+
+confirm() {
+  local msg="$1"
+  echo
+  echo "==> $msg"
+  read -r -p "    Proceed? [Y/n] " ans
+  case "$ans" in
+    ""|y|Y) return 0 ;;
+    *) echo "Aborted." >&2; exit 1 ;;
+  esac
+}
+
 # --- Validate args -----------------------------------------------------------
 
 if [[ $# -ne 1 ]]; then
@@ -44,46 +57,55 @@ fi
 
 echo "==> Releasing c2 ${TAG}"
 
-# --- Build dist tarball ------------------------------------------------------
+# --- Stage 1: Build dist tarball ---------------------------------------------
 
-echo "==> Building dist..."
+confirm "Stage 1/6 — Build dist tarball: run 'make dist VERSION=${VERSION}' → ${TARBALL}"
 make dist VERSION="$VERSION"
 
 if [[ ! -f "$TARBALL" ]]; then
   echo "error: expected tarball not found: $TARBALL" >&2
   exit 1
 fi
+echo "    OK: $(du -sh "$TARBALL" | cut -f1) written to $TARBALL"
 
-# --- Tag and push ------------------------------------------------------------
+# --- Stage 2: Tag and push ---------------------------------------------------
 
-echo "==> Tagging ${TAG}..."
+confirm "Stage 2/6 — Tag and push: create git tag ${TAG} and push to origin"
 git tag "$TAG"
 git push origin "$TAG"
+echo "    OK: tag ${TAG} pushed"
 
-# --- Create and publish GitHub release ---------------------------------------
+# --- Stage 3: Create GitHub release ------------------------------------------
 
-echo "==> Creating GitHub release ${TAG}..."
+confirm "Stage 3/6 — Create GitHub release: publish ${TAG} and upload tarball"
 gh release create "$TAG" "$TARBALL" \
   --repo "$REPO" \
   --title "$TAG" \
   --generate-notes
+echo "    OK: release ${TAG} published"
 
-# --- Compute SHA256 ----------------------------------------------------------
+# --- Stage 4: Compute SHA256 -------------------------------------------------
 
-echo "==> Computing SHA256..."
+confirm "Stage 4/6 — Compute SHA256: download tarball from GitHub and hash it"
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TAG}/${DIST_NAME}.tar.gz"
 SHA256=$(curl -sL "$DOWNLOAD_URL" | shasum -a 256 | awk '{print $1}')
 echo "    SHA256: $SHA256"
 
-# --- Update Homebrew formula -------------------------------------------------
+# --- Stage 5: Update Homebrew formula ----------------------------------------
 
-echo "==> Updating Homebrew formula..."
+confirm "Stage 5/6 — Update Homebrew formula: patch version=${VERSION} sha256=${SHA256} in ${HOMEBREW_FORMULA}"
 sed -i '' "s/version \".*\"/version \"${VERSION}\"/" "$HOMEBREW_FORMULA"
 sed -i '' "s/sha256 \".*\"/sha256 \"${SHA256}\"/" "$HOMEBREW_FORMULA"
+echo "    OK: formula patched"
 
+# --- Stage 6: Commit and push Homebrew tap -----------------------------------
+
+confirm "Stage 6/6 — Commit and push Homebrew tap: git commit + push in tap repo"
 cd "$(dirname "$HOMEBREW_FORMULA")/.."
 git add Formula/c2.rb
 git commit -m "c2 ${VERSION}"
 git push
+echo "    OK: tap updated"
 
+echo
 echo "==> Done. c2 ${TAG} released."

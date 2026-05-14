@@ -24,3 +24,6 @@ CLAUDE.md
 
 # OS junk
 .DS_Store
+
+# Build artifacts / release dist
+dist/

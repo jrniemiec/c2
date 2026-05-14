@@ -10,6 +10,8 @@ A TUI-based command-and-control app for interacting with LLMs, bootstrapped from
 - **Full voice pipeline** — keyword wake word (KWS) → VAD → STT → command recognition or LLM
 - **TTS readout** — Kokoro (neural) or macOS `say` backend
 - **Resource viewer** — full-screen in-app overlay with TTS playback from cursor position
+- **Note dictation** — voice "note" mode prefixes input with `//`; clipboard copy strips it
+- **Input correction** — Ctrl+G or voice "correct that" sends input to an LLM for spell/grammar fix
 - **Topics, profiles, system prompts, resources, stats**
 - **Self-contained** — all data and config stored in `~/.c2/`
 
@@ -36,74 +38,108 @@ Never use bare `go build` — always go through `make`.
 
 ---
 
+## First run
+
+On first launch c2 creates `~/.c2/` with a default config and stays alive:
+
+```
+c2: first run — created /Users/you/.c2
+c2: copied default config to /Users/you/.c2/config.json
+c2:
+c2: API keys are read from environment variables:
+c2:   Anthropic  — ANTHROPIC_API_KEY  (or C2_ANTHROPIC_API_KEY)
+c2:   OpenAI     — OPENAI_API_KEY     (or C2_OPENAI_API_KEY)
+c2:   Ollama     — no key needed, set C2_OLLAMA_HOST if not localhost
+c2:
+c2: → edit /Users/you/.c2/config.json
+c2:   make sure you set the default LLM profile and default topic to the values you want
+c2: press Enter when ready to continue (or q to quit):
+```
+
+Edit the config, press Enter. c2 reloads and validates (`default_profile` set and exists). If there's an error it tells you what to fix and re-prompts.
+
+### Voice model setup
+
+After config is valid, c2 asks whether to download voice models (~500 MB):
+
+```
+c2: voice mode requires model downloads (~500 MB)
+c2: download now? [Y/n]:
+```
+
+Downloading shows a live progress bar:
+
+```
+    [=========>          ] 45%  23.1 / 51.2 MB
+```
+
+When all models are downloaded:
+
+```
+c2: bootstrap complete — all models downloaded and config written
+c2: continue? [Y/n]:
+```
+
+Press Enter or Y to launch the TUI directly — no need to restart c2.
+
+---
+
 ## Configuration
 
 All configuration and data live under `~/.c2/`.
 
-### Config file location
-
 ```
 ~/.c2/config.json       main config (LLM profiles + voice settings)
-~/.c2/debug.log         voice pipeline debug log
+~/.c2/debug.log         voice pipeline and setup debug log
+~/.c2/models/           downloaded voice models
 ```
 
 ### c2 config section
 
-The config file contains LLM profile settings and a `"c2"` section for voice/audio. Example:
+The config file contains LLM profile settings and a `"c2"` section for voice/audio:
 
 ```json
 {
-  "profile": "...",
+  "default_profile": "oai-mini",
+  "default_topic": "default",
   "c2": {
-    "tts_backend":   "kokoro",
-    "tts_model":     "/path/to/kokoro/model.onnx",
-    "tts_voices":    "/path/to/kokoro/voices.bin",
-    "tts_tokens":    "/path/to/kokoro/tokens.txt",
-    "tts_data_dir":  "/path/to/espeak-ng-data",
-    "tts_lexicon":   "",
-    "tts_voice":     "en-us",
-    "tts_speaker_id": 0,
-    "tts_speed":     1.0,
+    "tts_backend":   "say",
+    "tts_voice":     "",
+    "tts_speed":     200,
 
-    "vad_model":     "/path/to/silero_vad.onnx",
+    "vad_model":     "~/.c2/models/silero_vad.onnx",
 
-    "stt_encoder":   "/path/to/encoder.int8.onnx",
-    "stt_decoder":   "/path/to/decoder.int8.onnx",
-    "stt_tokens":    "/path/to/tokens.txt",
+    "stt_encoder":   "~/.c2/models/sherpa-onnx-whisper-tiny.en/tiny.en-encoder.int8.onnx",
+    "stt_decoder":   "~/.c2/models/sherpa-onnx-whisper-tiny.en/tiny.en-decoder.int8.onnx",
+    "stt_tokens":    "~/.c2/models/sherpa-onnx-whisper-tiny.en/tiny.en-tokens.txt",
     "stt_language":  "en",
 
-    "kws_encoder":   "/path/to/kws-encoder.onnx",
-    "kws_decoder":   "/path/to/kws-decoder.onnx",
-    "kws_joiner":    "/path/to/kws-joiner.onnx",
-    "kws_tokens":    "/path/to/kws-tokens.txt",
-    "kws_keywords":  "/path/to/c2_keywords.txt",
-    "kws_gain":      1.0,
+    "kws_encoder":   "~/.c2/models/sherpa-onnx-kws-zipformer-.../encoder.int8.onnx",
+    "kws_decoder":   "~/.c2/models/sherpa-onnx-kws-zipformer-.../decoder.onnx",
+    "kws_joiner":    "~/.c2/models/sherpa-onnx-kws-zipformer-.../joiner.int8.onnx",
+    "kws_tokens":    "~/.c2/models/sherpa-onnx-kws-zipformer-.../tokens.txt",
+    "kws_keywords":  "~/.c2/models/sherpa-onnx-kws-zipformer-.../c2_keywords.txt",
+    "kws_gain":      1.5,
 
-    "input_device":  "",
-
-    "correction_profile": "oai-mini",
-    "correction_prompt":  ""
+    "correction_profile": "oai-mini"
   }
 }
 ```
 
 | Field | Description |
 |---|---|
-| `tts_backend` | `"kokoro"` (neural) or `"say"` (macOS built-in) |
-| `tts_voice` | Language tag for Kokoro (`en-us`) or voice name for `say` (`Samantha`) |
-| `tts_speaker_id` | Speaker index for Kokoro (default 0) |
-| `tts_speed` | Words/min for `say` (default 200) or speed multiplier for Kokoro (default 1.0) |
+| `tts_backend` | `"say"` (macOS built-in) or `"kokoro"` (neural) |
+| `tts_voice` | Voice name for `say` (empty = system default); language tag for Kokoro (`en-us`) |
+| `tts_speed` | Words/min for `say` (default 200); speed multiplier for Kokoro (default 1.0) |
 | `vad_model` | Path to Silero VAD `.onnx` model |
-| `stt_encoder/decoder/tokens` | sherpa-onnx transducer STT model files |
+| `stt_encoder/decoder/tokens` | sherpa-onnx Whisper STT model files |
 | `stt_language` | STT language code (default `"en"`) |
 | `kws_*` | sherpa-onnx keyword spotter model files |
-| `kws_keywords` | File listing wake words, one per line prefixed with `@label` |
-| `kws_gain` | Amplitude boost applied to KWS input only (0 = disabled) |
-| `input_device` | Microphone device name (empty = system default) |
-| `correction_profile` | Profile used for Ctrl+R input correction (default: `"oai-mini"`) |
-| `correction_prompt` | System prompt for Ctrl+R correction (empty = built-in default) |
+| `kws_keywords` | File listing wake words (one per line, `@label` prefix) |
+| `kws_gain` | Amplitude boost applied to KWS input (0 = disabled) |
+| `correction_profile` | Profile used for Ctrl+G / "correct that" input correction (default: `"oai-mini"`) |
 
-Voice is enabled automatically when `vad_model`, `stt_encoder`, and `stt_decoder` are set. KWS (wake word) is optional; without it voice is activated manually with Tab.
+Voice is enabled automatically when `vad_model`, `stt_encoder`, and `stt_decoder` are set. KWS (wake word "Computer") is optional; without it, voice is activated manually with Tab.
 
 ---
 
@@ -124,8 +160,9 @@ c2 [flags]
 | `--theme <auto\|light\|dark>` | | Color theme (default: auto) |
 | `--fold-lines <N>` | | Fold entries longer than N lines (default: 20, 0=never) |
 | `--fold-on-start` | | Start with all long entries folded |
-| `--ack-all-deletions` | | Require confirmation for all deletions, including single entries |
+| `--ack-all-deletions` | | Require confirmation for all deletions |
 | `--chat-labels` | | Prefix turns with [you]/[profile] (default: true) |
+| `--speak-corrected-note` | | Speak corrected text after Ctrl+G or "correct that" (default: true) |
 | `--no-tui` / `-nw` | | Headless/CLI mode |
 | `--tts` | | Speak response in CLI mode |
 | `--version` | `-v` | Print version and exit |
@@ -157,12 +194,12 @@ c2 [flags]
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ c2  topic: default  profile: gpt4  ● VOICE MODE             │
+│ c2  topic: default  profile: oai-mini  ● VOICE MODE          │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  CONVERSATION PANE (scrollable)                              │
 │  [you] hello                                                 │
-│  [gpt4] Hello! How can I help?                               │
+│  [oai-mini] Hello! How can I help?                           │
 │                                                              │
 ├──────────────────────────────────────────────────────────────┤
 │  > type a message or speak after wake word                   │
@@ -177,7 +214,7 @@ The **status bar** is context-sensitive:
 - **Command output:** scrollable results pane
 - **Streaming:** `❄ streaming ●●●`
 - **Transcribing:** `❄ transcribing ●●●`
-- **Correcting:** `❄ correcting ●●●` (Ctrl+R in flight), then `✓ corrected` / `✓ no changes` for 2s
+- **Correcting:** `❄ correcting ●●●`, then `✓ corrected` / `✓ no changes` for 2s
 - **TTS playing:** `❄ ♪ #3  200 wpm  [ slower ] faster`
 
 ---
@@ -293,7 +330,7 @@ Resource files are referenced in prompts with `@name`. Supported path forms:
 | `/system-set <text>` | Set system prompt |
 | `/system-clear` | Remove system prompt |
 
-### Info
+### Info & view
 
 | Command | Description |
 |---|---|
@@ -301,13 +338,9 @@ Resource files are referenced in prompts with `@name`. Supported path forms:
 | `/status` | Show effective defaults |
 | `/stats` | Usage and cost stats |
 | `/voice-commands` | List all voice phrases |
+| `/log` | Toggle debug log tail in a new terminal window |
 | `/help [group]` | Show help (groups: topic resource profile system session info notes files nav theme view) |
 | `/delete-last [n]` | Delete last N exchanges |
-
-### View
-
-| Command | Description |
-|---|---|
 | `/tts [on\|off]` | Toggle auto-speech (no arg = toggle) |
 | `/play-all` | Speak all entries in conversation |
 | `/fold` | Collapse long entries |
@@ -330,13 +363,15 @@ Microphone
               └─► no match ─► send to LLM
 ```
 
+If the audio device disconnects (e.g. Bluetooth), the pipeline recovers automatically and resumes listening.
+
 ### Voice FSM states
 
 | State | Description |
 |---|---|
 | `IDLE` | KWS only; waiting for wake word |
 | `AWAKE` | Wake word heard; listening for command (750ms silence or 4s cap) |
-| `DICTATING` | Recording prompt via VAD+STT |
+| `DICTATING` | Recording prompt/note via VAD+STT |
 | `CONVERSING` | Continuous conversation; VAD+STT per turn |
 | `EXECUTING` | LLM call or TTS in progress |
 | `PAUSED` | Text mode active; pipeline idle |
@@ -361,12 +396,14 @@ Speak naturally after the wake word. Filler words ("please", "um", "hey", "just"
 | Say | Action |
 |---|---|
 | "ask" / "question" / "query" | Send input to LLM |
-| "note" / "take note" | Save note to history |
+| "note" / "take note" | Save note to history (input prefixed with `//`) |
 | "replay" / "repeat" | Re-speak last response |
 | "play last" / "play it" | Speak last message |
 | "play all" / "read all" | Speak all entries |
 | "scratch that" / "clear that" | Clear input buffer |
 | "delete last" / "undo" | Delete last exchange |
+| "correct that" / "fix that" / "fix grammar" | Send input for spell/grammar correction |
+| "copy input" / "copy prompt" | Copy input to clipboard (strips `//` in note mode) |
 | "fold" / "collapse" | Fold long entries |
 | "unfold" / "expand" | Expand entries |
 | "toggle tts" / "tts on" / "tts off" | Toggle auto-speech |
@@ -420,6 +457,7 @@ Speak naturally after the wake word. Filler words ("please", "um", "hey", "just"
 | "status" / "show status" | Show effective defaults |
 | "stats" / "statistics" | Usage and cost |
 | "voice commands" / "what can I say" | List voice phrases |
+| "show log" / "open log" / "close log" | Toggle debug log tail window |
 | "help" / "show help" | Show help |
 
 ### Voice accelerators
@@ -432,11 +470,12 @@ For commands that require a parameter (topic name, profile name, resource name),
 
 ```
 c2/
-├── main.go            entry point, flag parsing
+├── main.go            entry point, flag parsing, bootstrap flow
 ├── headless.go        CLI mode operations
 ├── audio/             PortAudio capture + playback
 ├── speech/            VAD (Silero), STT (sherpa-onnx), TTS (Kokoro), KWS
 ├── c2config/          voice/audio config
+├── setup/             first-run bootstrap, model download with progress
 ├── tui/               Bubbletea TUI
 │   ├── tui.go         startup + voice pipeline goroutine
 │   ├── model.go       state

@@ -8,7 +8,7 @@ A TUI-based command-and-control app for interacting with LLMs, bootstrapped from
 
 - **Voice + text input** — speak or type, switch modes with Tab
 - **Full voice pipeline** — keyword wake word (KWS) → VAD → STT → command recognition or LLM
-- **TTS readout** — Kokoro (neural) or macOS `say` backend; mic muted during playback to prevent feedback
+- **Dual TTS backends** — Kokoro (neural) for reading exchange text; macOS `say` for short command responses ("Deleted", "Conversing", etc.); each independently configurable
 - **Shell commands** — prefix input with `!` to run shell commands; output shown in the results pane
 - **Resource viewer** — full-screen in-app overlay with TTS playback from cursor position
 - **Note dictation** — voice "note" mode prefixes input with `//`; clipboard copy strips it
@@ -106,34 +106,61 @@ The config file contains LLM profile settings and a `"c2"` section for voice/aud
   "default_profile": "oai-mini",
   "default_topic": "default",
   "c2": {
-    "tts_backend":   "say",
-    "tts_voice":     "",
-    "tts_speed":     200,
+    "tts_readout_backend":    "kokoro",
+    "tts_readout_speed":      280,
+    "tts_readout_voice":      "",
+    "tts_readout_speaker_id": 0,
 
-    "vad_model":     "~/.c2/models/silero_vad.onnx",
+    "tts_command_speed":      200,
+    "tts_command_voice":      "",
 
-    "stt_encoder":   "~/.c2/models/sherpa-onnx-whisper-tiny.en/tiny.en-encoder.int8.onnx",
-    "stt_decoder":   "~/.c2/models/sherpa-onnx-whisper-tiny.en/tiny.en-decoder.int8.onnx",
-    "stt_tokens":    "~/.c2/models/sherpa-onnx-whisper-tiny.en/tiny.en-tokens.txt",
-    "stt_language":  "en",
+    "tts_model":    "~/.c2/models/kokoro-en-v0_19/model.onnx",
+    "tts_voices":   "~/.c2/models/kokoro-en-v0_19/voices.bin",
+    "tts_tokens":   "~/.c2/models/kokoro-en-v0_19/tokens.txt",
+    "tts_data_dir": "~/.c2/models/kokoro-en-v0_19/espeak-ng-data",
 
-    "kws_encoder":   "~/.c2/models/sherpa-onnx-kws-zipformer-.../encoder.int8.onnx",
-    "kws_decoder":   "~/.c2/models/sherpa-onnx-kws-zipformer-.../decoder.onnx",
-    "kws_joiner":    "~/.c2/models/sherpa-onnx-kws-zipformer-.../joiner.int8.onnx",
-    "kws_tokens":    "~/.c2/models/sherpa-onnx-kws-zipformer-.../tokens.txt",
-    "kws_keywords":  "~/.c2/models/sherpa-onnx-kws-zipformer-.../c2_keywords.txt",
-    "kws_gain":      1.5,
+    "vad_model":    "~/.c2/models/silero_vad.onnx",
+
+    "stt_encoder":  "~/.c2/models/sherpa-onnx-whisper-tiny.en/tiny.en-encoder.int8.onnx",
+    "stt_decoder":  "~/.c2/models/sherpa-onnx-whisper-tiny.en/tiny.en-decoder.int8.onnx",
+    "stt_tokens":   "~/.c2/models/sherpa-onnx-whisper-tiny.en/tiny.en-tokens.txt",
+    "stt_language": "en",
+
+    "kws_encoder":  "~/.c2/models/sherpa-onnx-kws-zipformer-.../encoder.int8.onnx",
+    "kws_decoder":  "~/.c2/models/sherpa-onnx-kws-zipformer-.../decoder.onnx",
+    "kws_joiner":   "~/.c2/models/sherpa-onnx-kws-zipformer-.../joiner.int8.onnx",
+    "kws_tokens":   "~/.c2/models/sherpa-onnx-kws-zipformer-.../tokens.txt",
+    "kws_keywords": "~/.c2/models/sherpa-onnx-kws-zipformer-.../c2_keywords.txt",
+    "kws_gain":     1.5,
 
     "correction_profile": "oai-mini"
   }
 }
 ```
 
+#### Readout TTS — exchange text (s key, replay, play-all)
+
 | Field | Description |
 |---|---|
-| `tts_backend` | `"say"` (macOS built-in) or `"kokoro"` (neural) |
-| `tts_voice` | Voice name for `say` (empty = system default); language tag for Kokoro (`en-us`) |
-| `tts_speed` | Words/min for `say` (default 200); speed multiplier for Kokoro (default 1.0) |
+| `tts_readout_backend` | `"kokoro"` (neural, default) or `"say"` (macOS built-in) |
+| `tts_readout_speed` | Words/min — mapped to Kokoro speed as `wpm/200` (280 → 1.4×) |
+| `tts_readout_voice` | Kokoro language tag (e.g. `"en-us"`); or `say` voice name |
+| `tts_readout_speaker_id` | Kokoro speaker index (default 0) |
+| `tts_model` / `tts_voices` / `tts_tokens` / `tts_data_dir` | Kokoro model file paths |
+
+#### Command TTS — short responses ("Deleted", "Conversing", etc.)
+
+Always uses macOS `say`. Interrupts and kills any running readout.
+
+| Field | Description |
+|---|---|
+| `tts_command_speed` | Words/min for `say` (default 200) |
+| `tts_command_voice` | `say` voice name (empty = system default) |
+
+#### Other voice fields
+
+| Field | Description |
+|---|---|
 | `vad_model` | Path to Silero VAD `.onnx` model |
 | `stt_encoder/decoder/tokens` | sherpa-onnx Whisper STT model files |
 | `stt_language` | STT language code (default `"en"`) |
@@ -219,7 +246,7 @@ The **status bar** is context-sensitive:
 - **Streaming:** `❄ streaming ●●●`
 - **Transcribing:** `❄ transcribing ●●●`
 - **Correcting:** `❄ correcting ●●●`, then `✓ corrected` / `✓ no changes` for 2s
-- **TTS playing:** `❄ ♪ #3  200 wpm  [ slower ] faster`
+- **TTS playing:** `❄ ♪ #3  280 wpm  [ slower ] faster` (readout speed; `[`/`]` adjust it live)
 
 ---
 
@@ -252,12 +279,12 @@ The **status bar** is context-sensitive:
 | `s` | Speak current entry (TTS) |
 | `x` | Delete current entry (with confirmation) |
 
-### TTS playback
+### TTS playback (readout)
 
 | Key | Action |
 |---|---|
-| `[` | Decrease speed |
-| `]` | Increase speed |
+| `[` | Decrease readout speed (–20 wpm; Kokoro: takes effect next sentence) |
+| `]` | Increase readout speed (+20 wpm; Kokoro: takes effect next sentence) |
 | `s` | Stop playback |
 
 ### Resource viewer overlay
@@ -393,7 +420,7 @@ Speak naturally after the wake word. Filler words ("please", "um", "hey", "just"
 | "resume" / "keep going" | Resume TTS |
 | "start session" | Enter conversation mode |
 | "stop session" | Leave conversation mode |
-| "continue" / "never mind" / "thank you" | Resume from EXECUTING |
+| "continue" / "never mind" / "thank you" | Resume suspended TTS (if any) and return to prior state |
 
 #### Conversation
 

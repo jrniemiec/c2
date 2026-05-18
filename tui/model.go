@@ -200,9 +200,11 @@ type Model struct {
 	ttsKokoroStop   chan struct{}      // closed to interrupt Kokoro playback
 	ttsEngine       *speech.TTSEngine // lazy-initialised Kokoro engine (nil until first use)
 	ttsExIdx        int               // exchange being spoken (-1 = none)
+	ttsCurrentText  string            // text of the sentence currently being spoken
 	ttsQueue        []int             // pending exchange indices for play-all (/play-all command)
 	ttsAuto         bool              // auto-speak each response as it completes
-	ttsRate         int               // words-per-minute for say(1) (default 200)
+	ttsReadoutRate  int               // words-per-minute for readout TTS (Kokoro: wpm/200; say: -r flag)
+	ttsCommandRate  int               // words-per-minute for command TTS via say(1)
 	ttsGen          int               // incremented on each startTTS; stale ttsDoneMsgs are ignored
 
 	// Sentence-streaming TTS (active while ttsAuto and streaming)
@@ -303,7 +305,8 @@ func New(eng *engine.Engine, cfg config.Config, dataDir string) Model {
 		deletingExIdx:   -1,
 		historyIdx:      -1,
 		ttsExIdx:        -1,
-		ttsRate:         200,
+		ttsReadoutRate:  200,
+		ttsCommandRate:  200,
 		cursorVisible:   true,
 		windowFocused:   true,
 		themeMode:       "auto",
@@ -580,6 +583,8 @@ func (m *Model) isTTSPlaying() bool {
 // killTTS stops any in-flight TTS (say or Kokoro) and clears all TTS state.
 func (m *Model) killTTS() {
 	m.ttsExIdx = -1
+	m.ttsCurrentText = ""
+	m.ttsEngine = nil // release engine so any in-flight inference goroutine uses its own reference
 	m.ttsQueue = nil
 	m.ttsPendingSentences = nil
 	m.streamSentenceBuf = ""
@@ -619,12 +624,23 @@ func killTTSAudio(m *Model) {
 // stream buffer so that resumeTTS can restore them. Unlike killTTS it does
 // not discard the queue.
 func (m *Model) suspendTTS() {
+	// Prepend the currently-playing sentence so resume restarts from where we
+	// were interrupted, not from the next sentence.
+	saved := m.ttsPendingSentences
+	if m.ttsCurrentText != "" {
+		saved = append([]ttsPendingItem{{text: m.ttsCurrentText, exIdx: m.ttsExIdx}}, saved...)
+	}
 	m.suspended = &suspendedTTS{
-		sentences: m.ttsPendingSentences,
+		sentences: saved,
 		streamBuf: m.streamSentenceBuf,
+		ttsQueue:  m.ttsQueue,
 	}
 	m.ttsPendingSentences = nil
 	m.streamSentenceBuf = ""
+	m.ttsCurrentText = ""
+	m.ttsQueue = nil
+	// Unmute mic so the user can speak a follow-up command immediately.
+	setTTSMicMute(false)
 	// Stop audio output without discarding the queue (already moved above).
 	m.ttsExIdx = -1
 	if m.ttsCmd != nil {
@@ -638,16 +654,18 @@ func (m *Model) suspendTTS() {
 		close(m.ttsKokoroStop)
 		m.ttsKokoroStop = nil
 	}
+	m.ttsEngine = nil
 }
 
 // resumeTTS restores a previously suspended TTS queue and restarts playback.
-// Does nothing if there was no suspension.
-func (m *Model) resumeTTS() {
+// Does nothing if there was no suspension. Returns a Cmd to start playback (may be nil).
+func (m *Model) resumeTTS() tea.Cmd {
 	if m.suspended == nil {
-		return
+		return nil
 	}
 	m.ttsPendingSentences = m.suspended.sentences
 	m.streamSentenceBuf = m.suspended.streamBuf
+	m.ttsQueue = m.suspended.ttsQueue
 	m.suspended = nil
 	// Drain the restored queue: start playing the first pending sentence.
 	if len(m.ttsPendingSentences) > 0 {
@@ -655,8 +673,9 @@ func (m *Model) resumeTTS() {
 		m.ttsPendingSentences = m.ttsPendingSentences[1:]
 		m.ttsExIdx = next.exIdx
 		m.ttsGen++
-		startTTS(next.text, next.exIdx, m)
+		return startReadoutTTS(next.text, next.exIdx, m)
 	}
+	return nil
 }
 
 // scrollToBottom forces the viewport to the bottom and clears the userScrolled flag.

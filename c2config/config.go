@@ -20,21 +20,24 @@ type C2Config struct {
 	// VAD
 	VADModel string `json:"vad_model"`
 
-	// TTS — backend selection
-	// TTSBackend selects the engine: "say" (macOS default) or "kokoro" (sherpa-onnx).
-	TTSBackend string `json:"tts_backend"`
+	// TTS — readout backend (speaking exchange text on demand: s key, replay, play-all)
+	// TTSReadoutBackend selects the engine: "kokoro" (sherpa-onnx) or "say" (macOS).
+	TTSReadoutBackend   string  `json:"tts_readout_backend"`    // "kokoro" or "say"
+	TTSReadoutSpeed     float32 `json:"tts_readout_speed"`      // wpm; mapped to kokoro speed as wpm/200
+	TTSReadoutVoice     string  `json:"tts_readout_voice"`      // kokoro: lang tag (e.g. "en-us"); say: voice name
+	TTSReadoutSpeakerID int     `json:"tts_readout_speaker_id"` // kokoro speaker index (default 0)
 
-	// TTS — Kokoro model paths (used when TTSBackend == "kokoro")
-	TTSModel   string `json:"tts_model"`   // path to model.onnx
-	TTSVoices  string `json:"tts_voices"`  // path to voices.bin
-	TTSTokens  string `json:"tts_tokens"`  // path to tokens.txt
+	// TTS — command backend (acks and short responses: "Deleted", "Conversing", etc.)
+	// Always uses say(1).
+	TTSCommandSpeed float32 `json:"tts_command_speed"` // wpm for say (default 200)
+	TTSCommandVoice string  `json:"tts_command_voice"` // say voice name (empty = system default)
+
+	// TTS — Kokoro model paths (used when TTSReadoutBackend == "kokoro")
+	TTSModel   string `json:"tts_model"`    // path to model.onnx
+	TTSVoices  string `json:"tts_voices"`   // path to voices.bin
+	TTSTokens  string `json:"tts_tokens"`   // path to tokens.txt
 	TTSDataDir string `json:"tts_data_dir"` // path to espeak-ng-data directory
-	TTSLexicon string `json:"tts_lexicon"` // optional lexicon file path
-
-	// TTS — shared settings
-	TTSVoice      string  `json:"tts_voice"`       // say: voice name (e.g. "Samantha"); kokoro: language tag (e.g. "en-us")
-	TTSSpeakerID  int     `json:"tts_speaker_id"`  // kokoro: speaker index (default 0)
-	TTSSpeed      float32 `json:"tts_speed"`       // say: words/min (default 200); kokoro: speed multiplier (default 1.0)
+	TTSLexicon string `json:"tts_lexicon"`  // optional lexicon file path
 
 	// KWS — KeywordSpotter (transducer) model paths
 	KWSEncoder  string  `json:"kws_encoder"`

@@ -9,16 +9,17 @@ import (
 
 const playbackChunk = 1024 // samples per write; controls interrupt granularity
 
-// playMu ensures only one output stream is open at a time.
+// PlayMu ensures only one output stream is open at a time.
 // Concurrent calls to Play (e.g. beep + TTS) would cause Core Audio -50 errors.
-var playMu sync.Mutex
+// Exported so that kokoro_stream.go can acquire it for the duration of streaming playback.
+var PlayMu sync.Mutex
 
 // Play writes mono float32 PCM samples to the default output device at the
 // given sample rate. It returns early (without error) if stop is closed.
 // PortAudio must already be initialised via audio.Init().
 func Play(samples []float32, sampleRate int, stop <-chan struct{}) error {
-	playMu.Lock()
-	defer playMu.Unlock()
+	PlayMu.Lock()
+	defer PlayMu.Unlock()
 	buf := make([]float32, playbackChunk)
 	stream, err := portaudio.OpenDefaultStream(
 		0,          // no input

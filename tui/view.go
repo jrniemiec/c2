@@ -865,10 +865,7 @@ func renderResourceHintBar(m *Model) string {
 	sep := fg(t.BoxBorder, strings.Repeat("─", m.width))
 	var hint string
 	if m.isTTSPlaying() {
-		var speedHint string
-		if m.c2cfg.TTSBackend != "kokoro" {
-			speedHint = fmt.Sprintf("  ·  %d wpm  [ slower  ] faster", m.ttsRate)
-		}
+		speedHint := fmt.Sprintf("  ·  %d wpm  [ slower  ] faster", m.ttsReadoutRate)
 		hint = renderWaveIndicator(m.spinnerFrame, "speaking"+speedHint+"  ·  s stop  ·  Ctrl+X close", t.StreamingText, t.Dimmed)
 	} else {
 		hint = fg(t.Dimmed, "↑↓ / PgUp PgDn  move  ·  s speak from here  ·  e edit  ·  g/G top/bottom  ·  Ctrl+X  close")
@@ -883,12 +880,7 @@ func renderStatsLine(m *Model, sep string) string {
 	// Left: spinner + state indicator (transcribing → streaming → TTS playback).
 	var left string
 	if m.isTTSPlaying() {
-		var ttsLabel string
-		if m.c2cfg.TTSBackend == "kokoro" {
-			ttsLabel = fmt.Sprintf("♪ #%d  kokoro", m.ttsExIdx+1)
-		} else {
-			ttsLabel = fmt.Sprintf("♪ #%d  %d wpm  [ slower  ] faster", m.ttsExIdx+1, m.ttsRate)
-		}
+		ttsLabel := fmt.Sprintf("♪ #%d  %d wpm  [ slower  ] faster", m.ttsExIdx+1, m.ttsReadoutRate)
 		left = renderWaveIndicator(m.spinnerFrame, ttsLabel, t.StreamingText, t.Dimmed)
 	} else if m.correcting {
 		left = renderWaveIndicator(m.spinnerFrame, "correcting", t.StreamingText, t.Dimmed)

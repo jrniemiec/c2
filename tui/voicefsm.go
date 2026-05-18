@@ -172,4 +172,5 @@ func matchVoiceCommand(text string) string {
 type suspendedTTS struct {
 	sentences  []ttsPendingItem
 	streamBuf  string
+	ttsQueue   []int // play-all exchange indices not yet started
 }

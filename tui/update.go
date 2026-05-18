@@ -175,9 +175,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case voiceExecutingTimeoutMsg:
 		if m.voiceState == VoiceExecuting {
-			clog.Debugf("fsm: EXECUTING timeout → IDLE")
+			clog.Warnf("fsm: EXECUTING timeout fired — TTS did not start within 5s, forcing IDLE")
 			m.setVoiceState(VoiceIdle)
-			go playBeep(beepUnrecognized)
 		}
 
 	case clipboardFlashMsg:
@@ -261,6 +260,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.awakeTimer != nil {
 						m.awakeTimer.Stop()
 					}
+					clog.Debugf("fsm: awake timer reset %s (fail retry)", awakeTimeout)
 					m.awakeTimer = time.AfterFunc(awakeTimeout, func() {
 						if programSend != nil {
 							programSend(voiceAwakeTimeoutMsg{})
@@ -355,8 +355,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ttsDoneMsg:
 		if msg.gen != m.ttsGen {
+			clog.Debugf("tts: done gen=%d stale (current=%d) — ignored", msg.gen, m.ttsGen)
 			break // stale message from a killed process — ignore
 		}
+		clog.Debugf("tts: done gen=%d pending=%d resQ=%d playQ=%d", msg.gen, len(m.ttsPendingSentences), len(m.resourceTTSQueue), len(m.ttsQueue))
 		m.ttsCmd = nil
 		m.ttsKokoroStop = nil
 		m.ttsExIdx = -1
@@ -364,7 +366,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.ttsPendingSentences) > 0 {
 			next := m.ttsPendingSentences[0]
 			m.ttsPendingSentences = m.ttsPendingSentences[1:]
-			cmds = append(cmds, startTTS(next.text, next.exIdx, &m))
+			cmds = append(cmds, startReadoutTTS(next.text, next.exIdx, &m))
 		} else if len(m.resourceTTSQueue) > 0 && m.focus == paneResource {
 			// Drain resource line-by-line queue.
 			next := m.resourceTTSQueue[0]
@@ -373,13 +375,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resourceTTSText = m.resourceLines[next]
 			m.rebuildResourceContent()
 			m.scrollResourceToCursor()
-			cmds = append(cmds, startTTS(ttsStrip(m.resourceTTSText), -1, &m))
+			cmds = append(cmds, startReadoutTTS(ttsStrip(m.resourceTTSText), -1, &m))
 		} else if len(m.ttsQueue) > 0 {
 			// Drain play-all queue.
 			next := m.ttsQueue[0]
 			m.ttsQueue = m.ttsQueue[1:]
 			if next < len(m.exchanges) {
-				cmds = append(cmds, startTTS(ttsText(&m.exchanges[next]), next, &m))
+				enqueueTTSText(ttsText(&m.exchanges[next]), next, &m, &cmds)
 			}
 		} else if m.correctionTTSPending {
 			// Correction speech done — restore voice state now.
@@ -388,13 +390,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setVoiceState(m.correctionVoiceState)
 				m.correctionVoiceState = VoiceIdle
 			}
-		} else if m.voiceSession && m.voiceState == VoiceExecuting && !m.streaming {
-			// All TTS drained and stream complete — return to listening in a continuous session.
+		} else if m.voiceState == VoiceExecuting && !m.streaming {
+			// All TTS drained — leave EXECUTING.
 			if m.executingTimer != nil {
 				m.executingTimer.Stop()
 				m.executingTimer = nil
 			}
-			m.setVoiceState(VoiceConversing)
+			if m.voiceSession {
+				m.setVoiceState(VoiceConversing)
+			} else {
+				m.setVoiceState(m.voiceReturnState)
+			}
 		}
 		// Unmute mic only when all queues are empty (no more TTS coming).
 		if !m.isTTSPlaying() && len(m.ttsPendingSentences) == 0 &&
@@ -439,7 +445,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.speakCorrectedNote && textChanged {
 				// Speak result; restore voice state only after TTS finishes.
 				m.correctionTTSPending = true
-				cmds = append(cmds, startTTS("After correction: "+msg.text, -1, &m))
+				cmds = append(cmds, startCommandTTS("After correction: "+msg.text, &m))
 			} else {
 				// Restore voice state immediately.
 				if m.correctionVoiceState != VoiceIdle {
@@ -520,6 +526,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.voiceReturnState = m.voiceState
 				m.voiceFailCount = 0
 				m.setVoiceState(VoiceAwake)
+				clog.Debugf("fsm: awake timer set 5s (ctrl+space)")
 				m.awakeTimer = time.AfterFunc(5*time.Second, func() {
 					if programSend != nil {
 						programSend(voiceAwakeTimeoutMsg{})
@@ -577,25 +584,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 
-		// [ / ] — adjust TTS speed while playing; restart at new rate.
+		// [ / ] — adjust TTS speed while playing.
+		// For say: restart current sentence immediately at new rate.
+		// For kokoro: update rate only — takes effect on next sentence (inference cannot be interrupted).
 		if msg.Type == tea.KeyRunes && m.isTTSPlaying() {
 			switch string(msg.Runes) {
 			case "[":
-				if m.ttsRate > 80 {
-					m.ttsRate -= 20
+				if m.ttsReadoutRate > 80 {
+					m.ttsReadoutRate -= 20
 				}
-				exIdx := m.ttsExIdx
-				m.killTTS()
-				cmds = append(cmds, startTTS(ttsText(&m.exchanges[exIdx]), exIdx, &m))
-				return m, tea.Batch(cmds...)
+				if m.c2cfg.TTSReadoutBackend != "kokoro" {
+					text := m.ttsCurrentText
+					exIdx := m.ttsExIdx
+					m.killTTS()
+					cmds = append(cmds, startReadoutTTS(text, exIdx, &m))
+					return m, tea.Batch(cmds...)
+				}
 			case "]":
-				if m.ttsRate < 500 {
-					m.ttsRate += 20
+				if m.ttsReadoutRate < 500 {
+					m.ttsReadoutRate += 20
 				}
-				exIdx := m.ttsExIdx
-				m.killTTS()
-				cmds = append(cmds, startTTS(ttsText(&m.exchanges[exIdx]), exIdx, &m))
-				return m, tea.Batch(cmds...)
+				if m.c2cfg.TTSReadoutBackend != "kokoro" {
+					text := m.ttsCurrentText
+					exIdx := m.ttsExIdx
+					m.killTTS()
+					cmds = append(cmds, startReadoutTTS(text, exIdx, &m))
+					return m, tea.Batch(cmds...)
+				}
 			}
 		}
 
@@ -867,7 +882,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								next := m.ttsQueue[0]
 								m.ttsQueue = m.ttsQueue[1:]
 								if next < len(m.exchanges) {
-									cmds = append(cmds, startTTS(ttsText(&m.exchanges[next]), next, &m))
+									enqueueTTSText(ttsText(&m.exchanges[next]), next, &m, &cmds)
 								}
 							}
 						}
@@ -1076,8 +1091,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.rebuildConvContent()
 					} else {
 						exIdx := m.focusedExIdx
-						text := ttsText(&m.exchanges[exIdx])
-						cmds = append(cmds, startTTS(text, exIdx, &m))
+						enqueueTTSText(ttsText(&m.exchanges[exIdx]), exIdx, &m, &cmds)
 					}
 					return m, tea.Batch(cmds...)
 				case "v":
@@ -1449,6 +1463,19 @@ func extractSentences(s string) (sentences []string, remainder string) {
 	return
 }
 
+// enqueueTTSText splits full exchange text into sentences and enqueues each one.
+// Use this instead of startTTS when playing back a full exchange (s key, replay, play-all).
+func enqueueTTSText(text string, exIdx int, m *Model, cmds *[]tea.Cmd) {
+	sentences, remainder := extractSentences(ttsStrip(text))
+	remainder = strings.TrimSpace(ttsStrip(remainder))
+	if remainder != "" {
+		sentences = append(sentences, remainder)
+	}
+	for _, s := range sentences {
+		enqueueSentenceTTS(s, s, exIdx, m, cmds)
+	}
+}
+
 // enqueueSentenceTTS appends a sentence to the TTS pipeline.
 // If nothing is playing it starts immediately; otherwise it queues.
 func enqueueSentenceTTS(text, stripped string, exIdx int, m *Model, cmds *[]tea.Cmd) {
@@ -1456,62 +1483,130 @@ func enqueueSentenceTTS(text, stripped string, exIdx int, m *Model, cmds *[]tea.
 		return
 	}
 	if !m.isTTSPlaying() && len(m.ttsPendingSentences) == 0 {
-		*cmds = append(*cmds, startTTS(stripped, exIdx, m))
+		*cmds = append(*cmds, startReadoutTTS(stripped, exIdx, m))
 	} else {
 		m.ttsPendingSentences = append(m.ttsPendingSentences, ttsPendingItem{text: stripped, exIdx: exIdx})
 	}
 }
 
-// startTTS launches the configured TTS backend for the given text and returns
-// a Cmd that sends ttsDoneMsg when playback finishes.
-func startTTS(text string, exIdx int, m *Model) tea.Cmd {
+// startReadoutTTS launches the readout TTS backend (Kokoro or say) for exchange
+// text spoken on demand (s key, replay, play-all, resource view).
+func startReadoutTTS(text string, exIdx int, m *Model) tea.Cmd {
+	// TTS has started — cancel the executing safety timer so it doesn't
+	// fire mid-playback and incorrectly reset state.
+	if m.executingTimer != nil {
+		m.executingTimer.Stop()
+		m.executingTimer = nil
+	}
 	m.ttsGen++
 	gen := m.ttsGen
 	m.ttsExIdx = exIdx
+	m.ttsCurrentText = text
 	m.rebuildConvContent()
 	setTTSMicMute(true)
-
-	if m.c2cfg.TTSBackend == "kokoro" {
-		return startTTSKokoro(text, gen, m)
+	preview := text
+	if len([]rune(preview)) > 60 {
+		preview = string([]rune(preview)[:60]) + "…"
 	}
-	return startTTSSay(text, gen, m)
+	clog.Debugf("tts: readout gen=%d backend=%s exIdx=%d text=%q", gen, m.c2cfg.TTSReadoutBackend, exIdx, preview)
+
+	if m.c2cfg.TTSReadoutBackend == "kokoro" {
+		return startTTSKokoroStream(text, gen, m)
+	}
+	return startTTSSay(text, m.ttsReadoutRate, m.c2cfg.TTSReadoutVoice, gen, m)
 }
 
-// startTTSAck speaks a short acknowledgement word at a fixed slower rate.
-func startTTSAck(text string, m *Model) tea.Cmd {
-	saved := m.ttsRate
-	m.ttsRate = 140
-	cmd := startTTS(text, -1, m)
-	m.ttsRate = saved
-	return cmd
+// startCommandTTS speaks a short command acknowledgement or response via say(1).
+// It kills any running Kokoro readout before speaking.
+func startCommandTTS(text string, m *Model) tea.Cmd {
+	m.killTTS()
+	m.ttsGen++
+	gen := m.ttsGen
+	m.ttsExIdx = -1
+	setTTSMicMute(true)
+	clog.Debugf("tts: command gen=%d text=%q", gen, text)
+	return startTTSSay(text, m.ttsCommandRate, m.c2cfg.TTSCommandVoice, gen, m)
 }
 
 // startTTSSay uses macOS say(1).
 // A per-call timeout is estimated from text length to guard against say(1) hangs.
-func startTTSSay(text string, gen int, m *Model) tea.Cmd {
-	args := []string{"-r", fmt.Sprintf("%d", m.ttsRate)}
-	if m.c2cfg.TTSVoice != "" {
-		args = append(args, "-v", m.c2cfg.TTSVoice)
+func startTTSSay(text string, rate int, voice string, gen int, m *Model) tea.Cmd {
+	if rate <= 0 {
+		rate = 200
 	}
-	// Estimate a generous timeout: assume ~5 chars/word, 3× safety factor, min 15s.
+	args := []string{"-r", fmt.Sprintf("%d", rate)}
+	if voice != "" {
+		args = append(args, "-v", voice)
+	}
+	// Estimate timeout: expected speech time + 3s grace for say(1) audio drain, min 8s.
+	// Multiply before dividing to avoid integer truncation (60/200 = 0).
 	words := len([]rune(text))/5 + 1
-	secs := words * 60 / m.ttsRate * 3
-	if secs < 15 {
-		secs = 15
+	secs := words*60/rate + 3
+	if secs < 8 {
+		secs = 8
 	}
+	clog.Debugf("tts: say gen=%d rate=%d words~%d timeout=%ds", gen, rate, words, secs)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(secs)*time.Second)
 	cmd := exec.CommandContext(ctx, "say", args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin = strings.NewReader(text)
 	m.ttsCmd = cmd
+	t0 := time.Now()
 	return func() tea.Msg {
 		defer cancel()
 		err := cmd.Run()
+		elapsed := time.Since(t0).Round(time.Millisecond)
+		if err != nil {
+			clog.Errorf("tts: say gen=%d done err=%v elapsed=%s", gen, err, elapsed)
+		} else {
+			clog.Debugf("tts: say gen=%d done elapsed=%s", gen, elapsed)
+		}
 		return ttsDoneMsg{err: err, gen: gen}
 	}
 }
 
-// startTTSKokoro uses the sherpa-onnx Kokoro engine.
+// startTTSOsascript uses osascript to invoke macOS speech synthesis.
+// Unlike say(1), osascript exits cleanly when speech finishes, so no timeout kills occur.
+// Rollback: in startReadoutTTS, replace startTTSKokoroStream with startTTSOsascript.
+func startTTSOsascript(text string, rate int, voice string, gen int, m *Model) tea.Cmd {
+	if rate <= 0 {
+		rate = 200
+	}
+	// Escape double-quotes for AppleScript string literals (double them).
+	escaped := strings.ReplaceAll(text, `"`, `""`)
+	var script string
+	if voice != "" {
+		script = fmt.Sprintf(`say "%s" using "%s" speaking rate %d`, escaped, voice, rate)
+	} else {
+		script = fmt.Sprintf(`say "%s" speaking rate %d`, escaped, rate)
+	}
+	// Generous safety timeout only for genuine hangs; osascript should exit cleanly.
+	words := len([]rune(text))/5 + 1
+	secs := words*60/rate + 10
+	if secs < 15 {
+		secs = 15
+	}
+	clog.Debugf("tts: osascript gen=%d rate=%d words~%d timeout=%ds", gen, rate, words, secs)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(secs)*time.Second)
+	cmd := exec.CommandContext(ctx, "osascript", "-e", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	m.ttsCmd = cmd
+	t0 := time.Now()
+	return func() tea.Msg {
+		defer cancel()
+		err := cmd.Run()
+		elapsed := time.Since(t0).Round(time.Millisecond)
+		if err != nil {
+			clog.Errorf("tts: osascript gen=%d done err=%v elapsed=%s", gen, err, elapsed)
+		} else {
+			clog.Debugf("tts: osascript gen=%d done elapsed=%s", gen, elapsed)
+		}
+		return ttsDoneMsg{err: err, gen: gen}
+	}
+}
+
+// startTTSKokoro uses the sherpa-onnx Kokoro engine (batch mode, not streaming).
+// Rollback: in startReadoutTTS, replace startTTSKokoroStream with startTTSKokoro.
 func startTTSKokoro(text string, gen int, m *Model) tea.Cmd {
 	// Lazy-initialise the engine on first use.
 	if m.ttsEngine == nil {
@@ -1521,7 +1616,7 @@ func startTTSKokoro(text string, gen int, m *Model) tea.Cmd {
 			Tokens:  m.c2cfg.TTSTokens,
 			DataDir: m.c2cfg.TTSDataDir,
 			Lexicon: m.c2cfg.TTSLexicon,
-			Lang:    m.c2cfg.TTSVoice, // voice field holds lang tag for Kokoro
+			Lang:    m.c2cfg.TTSReadoutVoice,
 		})
 		if err != nil {
 			return func() tea.Msg { return ttsDoneMsg{err: err, gen: gen} }
@@ -1532,8 +1627,8 @@ func startTTSKokoro(text string, gen int, m *Model) tea.Cmd {
 	m.ttsKokoroStop = stopCh
 
 	eng := m.ttsEngine
-	speakerID := m.c2cfg.TTSSpeakerID
-	speed := m.c2cfg.TTSSpeed
+	speakerID := m.c2cfg.TTSReadoutSpeakerID
+	speed := float32(m.ttsReadoutRate) / 200.0
 	if speed <= 0 {
 		speed = 1.0
 	}
@@ -1544,6 +1639,45 @@ func startTTSKokoro(text string, gen int, m *Model) tea.Cmd {
 			return ttsDoneMsg{err: err, gen: gen}
 		}
 		err = audio.Play(samples, eng.SampleRate, stopCh)
+		return ttsDoneMsg{err: err, gen: gen}
+	}
+}
+
+// startTTSKokoroStream runs Kokoro inference and plays via PortAudio.
+// Rollback: in startReadoutTTS, replace startTTSKokoroStream with startTTSKokoro (batch) or startTTSSay.
+func startTTSKokoroStream(text string, gen int, m *Model) tea.Cmd {
+	if m.ttsEngine == nil {
+		eng, err := speech.NewTTSEngine(speech.TTSEngineConfig{
+			Model:   m.c2cfg.TTSModel,
+			Voices:  m.c2cfg.TTSVoices,
+			Tokens:  m.c2cfg.TTSTokens,
+			DataDir: m.c2cfg.TTSDataDir,
+			Lexicon: m.c2cfg.TTSLexicon,
+			Lang:    m.c2cfg.TTSReadoutVoice,
+		})
+		if err != nil {
+			return func() tea.Msg { return ttsDoneMsg{err: err, gen: gen} }
+		}
+		m.ttsEngine = eng
+	}
+	stopCh := make(chan struct{})
+	m.ttsKokoroStop = stopCh
+	eng := m.ttsEngine
+	speakerID := m.c2cfg.TTSReadoutSpeakerID
+	speed := float32(m.ttsReadoutRate) / 200.0
+	if speed <= 0 {
+		speed = 1.0
+	}
+	clog.Debugf("tts: kokoro-stream gen=%d speed=%.2f", gen, speed)
+	t0 := time.Now()
+	return func() tea.Msg {
+		err := eng.GenerateStreaming(text, speakerID, speed, stopCh)
+		elapsed := time.Since(t0).Round(time.Millisecond)
+		if err != nil {
+			clog.Errorf("tts: kokoro-stream gen=%d done err=%v elapsed=%s", gen, err, elapsed)
+		} else {
+			clog.Debugf("tts: kokoro-stream gen=%d done elapsed=%s", gen, elapsed)
+		}
 		return ttsDoneMsg{err: err, gen: gen}
 	}
 }
@@ -1589,6 +1723,7 @@ func (m *Model) handleKWSEvent(keyword string) []tea.Cmd {
 	}
 	startAwakeTimer := func() {
 		cancelTimer(&m.awakeTimer)
+		clog.Debugf("fsm: awake timer set 5s (kws path)")
 		m.awakeTimer = time.AfterFunc(5*time.Second, func() {
 			if programSend != nil {
 				programSend(voiceAwakeTimeoutMsg{})
@@ -1625,6 +1760,7 @@ func (m *Model) handleKWSEvent(keyword string) []tea.Cmd {
 			m.voiceFailCount = 0
 			m.setVoiceState(VoiceAwake)
 			cancelTimer(&m.awakeTimer)
+			clog.Debugf("fsm: awake timer set %s (interrupt from DICTATING)", awakeTimeout)
 			m.awakeTimer = time.AfterFunc(awakeTimeout, func() {
 				if programSend != nil {
 					programSend(voiceAwakeTimeoutMsg{})
@@ -1640,6 +1776,7 @@ func (m *Model) handleKWSEvent(keyword string) []tea.Cmd {
 			m.voiceReturnState = VoiceExecuting
 			m.voiceFailCount = 0
 			m.setVoiceState(VoiceAwake)
+			clog.Debugf("fsm: awake timer set %s (interrupt from EXECUTING)", awakeTimeout)
 			m.awakeTimer = time.AfterFunc(awakeTimeout, func() {
 				if programSend != nil {
 					programSend(voiceAwakeTimeoutMsg{})
@@ -1655,6 +1792,7 @@ func (m *Model) handleKWSEvent(keyword string) []tea.Cmd {
 			m.voiceReturnState = VoiceConversing
 			m.voiceFailCount = 0
 			m.setVoiceState(VoiceAwake)
+			clog.Debugf("fsm: awake timer set %s (interrupt from CONVERSING)", awakeTimeout)
 			m.awakeTimer = time.AfterFunc(awakeTimeout, func() {
 				if programSend != nil {
 					programSend(voiceAwakeTimeoutMsg{})
@@ -1704,30 +1842,30 @@ func (m *Model) handleResourceKey(msg tea.KeyMsg) []tea.Cmd {
 				m.resourceTTSText = m.resourceLines[queue[0]]
 				m.rebuildResourceContent()
 				m.scrollResourceToCursor()
-				cmds = append(cmds, startTTS(ttsStrip(m.resourceTTSText), -1, m))
+				cmds = append(cmds, startReadoutTTS(ttsStrip(m.resourceTTSText), -1, m))
 			}
 		}
 
 	case msg.Type == tea.KeyRunes && string(msg.Runes) == "[":
 		if m.isTTSPlaying() && m.resourceTTSText != "" {
-			if m.ttsRate > 80 {
-				m.ttsRate -= 20
+			if m.ttsReadoutRate > 80 {
+				m.ttsReadoutRate -= 20
 			}
 			text := m.resourceTTSText
 			m.resourceTTSQueue = m.resourceTTSQueue // preserve queue
 			killTTSAudio(m)
-			cmds = append(cmds, startTTS(ttsStrip(text), -1, m))
+			cmds = append(cmds, startReadoutTTS(ttsStrip(text), -1, m))
 		}
 
 	case msg.Type == tea.KeyRunes && string(msg.Runes) == "]":
 		if m.isTTSPlaying() && m.resourceTTSText != "" {
-			if m.ttsRate < 500 {
-				m.ttsRate += 20
+			if m.ttsReadoutRate < 500 {
+				m.ttsReadoutRate += 20
 			}
 			text := m.resourceTTSText
 			m.resourceTTSQueue = m.resourceTTSQueue // preserve queue
 			killTTSAudio(m)
-			cmds = append(cmds, startTTS(ttsStrip(text), -1, m))
+			cmds = append(cmds, startReadoutTTS(ttsStrip(text), -1, m))
 		}
 
 	case msg.Type == tea.KeyRunes && string(msg.Runes) == "e":
@@ -1818,7 +1956,9 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		if m.executingTimer != nil {
 			m.executingTimer.Stop()
 		}
+		clog.Debugf("fsm: executing timer set 5s")
 		m.executingTimer = time.AfterFunc(5*time.Second, func() {
+			clog.Debugf("fsm: executing timer expired after 5s")
 			if programSend != nil {
 				programSend(voiceExecutingTimeoutMsg{})
 			}
@@ -1874,7 +2014,7 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		go playAck()
 
 	case "resume", "resume_playback":
-		m.resumeTTS()
+		cmds = append(cmds, m.resumeTTS())
 		m.setVoiceState(VoiceExecuting)
 		startExecutingTimer()
 		go playAck()
@@ -1883,10 +2023,15 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		m.voiceSession = true
 		m.setVoiceState(VoiceConversing)
 		// go playBeep(beepWakeAck) — replaced by spoken "Conversing"
-		cmds = append(cmds, startTTSAck("Conversing", m))
+		cmds = append(cmds, startCommandTTS("Conversing", m))
 
 	case "session_resume":
-		if m.voiceSession {
+		if cmd := m.resumeTTS(); cmd != nil {
+			// Suspended TTS exists — restart it and stay in EXECUTING.
+			cmds = append(cmds, cmd)
+			m.setVoiceState(VoiceExecuting)
+			startExecutingTimer()
+		} else if m.voiceSession {
 			m.setVoiceState(VoiceConversing)
 		} else {
 			m.setVoiceState(m.voiceReturnState)
@@ -1921,13 +2066,12 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		m.input.SetValue("// ")
 		m.setVoiceState(VoiceDictating)
 		// go playBeep(beepDictStart) — replaced by spoken "Dictating"
-		cmds = append(cmds, startTTSAck("Dictating", m))
+		cmds = append(cmds, startCommandTTS("Dictating", m))
 
 	case "chat_replay", "chat_play_last":
 		if len(m.exchanges) > 0 {
 			last := len(m.exchanges) - 1
-			m.ttsGen++
-			cmds = append(cmds, startTTS(ttsText(&m.exchanges[last]), last, m))
+			enqueueTTSText(ttsText(&m.exchanges[last]), last, m, &cmds)
 		}
 		m.setVoiceState(VoiceExecuting)
 		startExecutingTimer()
@@ -1940,8 +2084,7 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		if len(m.ttsQueue) > 0 {
 			next := m.ttsQueue[0]
 			m.ttsQueue = m.ttsQueue[1:]
-			m.ttsGen++
-			cmds = append(cmds, startTTS(ttsText(&m.exchanges[next]), next, m))
+			enqueueTTSText(ttsText(&m.exchanges[next]), next, m, &cmds)
 		}
 		m.setVoiceState(VoiceExecuting)
 		startExecutingTimer()
@@ -1986,6 +2129,15 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 
 	case "play_all":
 		m.submitVoiceSlashCmd("/play-all")
+		// submitVoiceSlashCmd does not have the TTS kickoff the typed-Enter path
+		// has, so we must start playback explicitly here.
+		if !m.isTTSPlaying() && len(m.ttsQueue) > 0 {
+			next := m.ttsQueue[0]
+			m.ttsQueue = m.ttsQueue[1:]
+			if next < len(m.exchanges) {
+				enqueueTTSText(ttsText(&m.exchanges[next]), next, m, &cmds)
+			}
+		}
 		m.setVoiceState(VoiceExecuting)
 		startExecutingTimer()
 
@@ -2032,7 +2184,7 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 	case "delete_last":
 		if len(m.exchanges) == 0 {
 			m.setVoiceState(VoiceIdle)
-			cmds = append(cmds, startTTS("Nothing to delete", -1, m))
+			cmds = append(cmds, startCommandTTS("Nothing to delete", m))
 		} else {
 			_, err := m.eng.DeleteLast(1)
 			if err == nil {
@@ -2045,7 +2197,7 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 			m.setVoiceState(VoiceIdle)
 			go playAck()
 			if err == nil {
-				cmds = append(cmds, startTTS("Deleted", -1, m))
+				cmds = append(cmds, startCommandTTS("Deleted", m))
 			}
 		}
 
@@ -2063,7 +2215,7 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		m.submitVoiceSlashCmd("/topic-list")
 		m.setVoiceState(VoiceIdle)
 		if m.lastCmd != nil && m.lastCmd.spokenText != "" {
-			cmds = append(cmds, startTTS(m.lastCmd.spokenText, -1, m))
+			cmds = append(cmds, startCommandTTS(m.lastCmd.spokenText, m))
 		} else {
 			go playAck()
 		}
@@ -2092,7 +2244,7 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		m.submitVoiceSlashCmd("/profile-list")
 		m.setVoiceState(VoiceIdle)
 		if m.lastCmd != nil && m.lastCmd.spokenText != "" {
-			cmds = append(cmds, startTTS(m.lastCmd.spokenText, -1, m))
+			cmds = append(cmds, startCommandTTS(m.lastCmd.spokenText, m))
 		} else {
 			go playAck()
 		}
@@ -2107,7 +2259,7 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 		m.submitVoiceSlashCmd("/resource-list")
 		m.setVoiceState(VoiceIdle)
 		if m.lastCmd != nil && m.lastCmd.spokenText != "" {
-			cmds = append(cmds, startTTS(m.lastCmd.spokenText, -1, m))
+			cmds = append(cmds, startCommandTTS(m.lastCmd.spokenText, m))
 		} else {
 			go playAck()
 		}
@@ -2138,7 +2290,7 @@ func (m *Model) executeAwakeCommand(label string) []tea.Cmd {
 			cmd := exec.Command("pbcopy")
 			cmd.Stdin = strings.NewReader(text)
 			_ = cmd.Run()
-			cmds = append(cmds, startTTS("Copied", -1, m))
+			cmds = append(cmds, startCommandTTS("Copied", m))
 		} else {
 			go playBeep(beepUnrecognized)
 		}
@@ -2253,13 +2405,19 @@ const (
 
 // sayAck speaks "OK" via macOS say(1) as a command acknowledgement.
 func sayAck() {
-	clog.Debugf("beep: say OK")
+	t0 := time.Now()
+	clog.Debugf("beep: say OK start")
 	args := []string{"OK"}
-	if activeC2Cfg.TTSVoice != "" {
-		args = append([]string{"-v", activeC2Cfg.TTSVoice}, args...)
+	if activeC2Cfg.TTSCommandVoice != "" {
+		args = append([]string{"-v", activeC2Cfg.TTSCommandVoice}, args...)
 	}
 	cmd := exec.Command("say", args...)
-	_ = cmd.Run()
+	err := cmd.Run()
+	if err != nil {
+		clog.Errorf("beep: say OK error: %v (elapsed %s)", err, time.Since(t0).Round(time.Millisecond))
+	} else {
+		clog.Debugf("beep: say OK done (%s)", time.Since(t0).Round(time.Millisecond))
+	}
 }
 
 // sayPrompt speaks an encouragement phrase after a failed command recognition.
@@ -2271,13 +2429,19 @@ func sayPrompt(n int) {
 	} else {
 		phrase = "Say again?"
 	}
-	clog.Debugf("beep: say prompt n=%d %q", n, phrase)
+	t0 := time.Now()
+	clog.Debugf("beep: say prompt n=%d %q start", n, phrase)
 	args := []string{phrase}
-	if activeC2Cfg.TTSVoice != "" {
-		args = append([]string{"-v", activeC2Cfg.TTSVoice}, args...)
+	if activeC2Cfg.TTSCommandVoice != "" {
+		args = append([]string{"-v", activeC2Cfg.TTSCommandVoice}, args...)
 	}
 	cmd := exec.Command("say", args...)
-	_ = cmd.Run()
+	err := cmd.Run()
+	if err != nil {
+		clog.Errorf("beep: say prompt error: %v (elapsed %s)", err, time.Since(t0).Round(time.Millisecond))
+	} else {
+		clog.Debugf("beep: say prompt done (%s)", time.Since(t0).Round(time.Millisecond))
+	}
 }
 
 // sayVoiceStatus speaks the current FSM context via macOS say(1).
@@ -2296,18 +2460,25 @@ func sayVoiceStatus(returnState VoiceState, topic, model string) {
 		state = "Ready"
 	}
 	phrase := fmt.Sprintf("%s. Topic: %s. Model: %s.", state, topic, model)
-	clog.Debugf("beep: say voice status %q", phrase)
+	t0 := time.Now()
+	clog.Debugf("beep: say voice status %q start", phrase)
 	args := []string{phrase}
-	if activeC2Cfg.TTSVoice != "" {
-		args = append([]string{"-v", activeC2Cfg.TTSVoice}, args...)
+	if activeC2Cfg.TTSCommandVoice != "" {
+		args = append([]string{"-v", activeC2Cfg.TTSCommandVoice}, args...)
 	}
 	cmd := exec.Command("say", args...)
-	_ = cmd.Run()
+	err := cmd.Run()
+	if err != nil {
+		clog.Errorf("beep: say voice status error: %v (elapsed %s)", err, time.Since(t0).Round(time.Millisecond))
+	} else {
+		clog.Debugf("beep: say voice status done (%s)", time.Since(t0).Round(time.Millisecond))
+	}
 }
 
 // beepSoftChime plays a soft 880Hz tone with a linear fade-out envelope.
 func beepSoftChime() {
-	clog.Debugf("beep: soft chime")
+	t0 := time.Now()
+	clog.Debugf("beep: soft chime start")
 	const sampleRate = 16000
 	const freq = 880.0
 	const durationMs = 200
@@ -2320,12 +2491,18 @@ func beepSoftChime() {
 		samples[i] = float32(amplitude * fade * sin(pi2*freq*float64(i)/float64(sampleRate)))
 	}
 	stopCh := make(chan struct{})
-	_ = audio.Play(samples, sampleRate, stopCh)
+	err := audio.Play(samples, sampleRate, stopCh)
+	if err != nil {
+		clog.Errorf("beep: soft chime audio.Play error: %v (elapsed %s)", err, time.Since(t0).Round(time.Millisecond))
+	} else {
+		clog.Debugf("beep: soft chime done (%s)", time.Since(t0).Round(time.Millisecond))
+	}
 }
 
 // beepEarcon plays a two-note C5→E5 motif (~60ms each).
 func beepEarcon() {
-	clog.Debugf("beep: earcon")
+	t0 := time.Now()
+	clog.Debugf("beep: earcon start")
 	const sampleRate = 16000
 	const durationMs = 70
 	const amplitude = 0.30
@@ -2350,7 +2527,12 @@ func beepEarcon() {
 		}
 	}
 	stopCh := make(chan struct{})
-	_ = audio.Play(samples, sampleRate, stopCh)
+	err := audio.Play(samples, sampleRate, stopCh)
+	if err != nil {
+		clog.Errorf("beep: earcon audio.Play error: %v (elapsed %s)", err, time.Since(t0).Round(time.Millisecond))
+	} else {
+		clog.Debugf("beep: earcon done (%s)", time.Since(t0).Round(time.Millisecond))
+	}
 }
 
 // playAck is the command-acknowledgement sound. Switch the call to compare options.
@@ -2362,7 +2544,8 @@ func playAck() {
 // playBeep plays a short audio tone for the given event. Runs in a goroutine.
 // First pass: simple sine-wave tones generated inline via the audio package.
 func playBeep(kind string) {
-	clog.Debugf("beep: %s", kind)
+	t0 := time.Now()
+	clog.Debugf("beep: %s start", kind)
 	const sampleRate = 16000
 	type tone struct{ freq float64; durationMs int }
 	var t tone
@@ -2380,7 +2563,12 @@ func playBeep(kind string) {
 	}
 	samples := makeSineTone(t.freq, t.durationMs, sampleRate)
 	stopCh := make(chan struct{})
-	_ = audio.Play(samples, sampleRate, stopCh)
+	err := audio.Play(samples, sampleRate, stopCh)
+	if err != nil {
+		clog.Errorf("beep: %s audio.Play error: %v (elapsed %s)", kind, err, time.Since(t0).Round(time.Millisecond))
+	} else {
+		clog.Debugf("beep: %s done (%s)", kind, time.Since(t0).Round(time.Millisecond))
+	}
 }
 
 // makeSineTone generates a sine-wave PCM buffer at the given frequency.

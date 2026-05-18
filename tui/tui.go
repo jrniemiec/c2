@@ -69,6 +69,12 @@ func Start(eng *engine.Engine, cfg config.Config, dataDir string, c2cfg c2config
 	m.ackAllDeletions = ackAllDeletions
 	m.speakCorrectedNote = speakCorrectedNote
 	m.c2cfg = c2cfg
+	if c2cfg.TTSReadoutSpeed > 0 {
+		m.ttsReadoutRate = int(c2cfg.TTSReadoutSpeed)
+	}
+	if c2cfg.TTSCommandSpeed > 0 {
+		m.ttsCommandRate = int(c2cfg.TTSCommandSpeed)
+	}
 
 	// Validate correction profile at startup so misconfiguration is caught early.
 	corrProfile := c2cfg.CorrectionProfile
